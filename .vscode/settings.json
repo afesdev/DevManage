@@ -1,0 +1,23 @@
+{
+    "sqltools.connections": [
+        {
+            "connectionTimeout": 15,
+            "mssqlOptions": {
+                "appName": "SQLTools",
+                "useUTC": true,
+                "encrypt": true,
+                "trustServerCertificate": true,
+                "abortTransactionOnError": false
+            },
+            "ssh": "Disabled",
+            "previewLimit": 50,
+            "server": "mssql-188335-0.cloudclusters.net",
+            "port": 1433,
+            "driver": "MSSQL",
+            "username": "andres",
+            "password": "Soypipe23@",
+            "name": "BD",
+            "database": "DevManageDB"
+        }
+    ]
+}
