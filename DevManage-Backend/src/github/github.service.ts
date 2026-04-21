@@ -246,9 +246,8 @@ export class GithubService {
     );
 
     const candidatos = this.extraerCandidatosTarea(args.textoBusqueda);
-    if (candidatos.idsCortos.size === 0 && candidatos.idsCompletos.size === 0) {
-      return;
-    }
+    const textoRama = this.normalizarTexto(args.ramaOrigen.replace(/[-_/]/g, ' '));
+    const textoBusqueda = this.normalizarTexto(args.textoBusqueda);
     const actorId =
       args.actorId ??
       (
@@ -262,12 +261,49 @@ export class GithubService {
       )?.usuario_id;
     if (!actorId) return;
 
+    const tareasObjetivo = new Set<string>();
     for (const tarea of tareas) {
       const id = tarea.tarea_id.toLowerCase();
       const idCorto = id.slice(0, 8);
       const matchDeterministico =
         candidatos.idsCompletos.has(id) || candidatos.idsCortos.has(idCorto);
-      if (!matchDeterministico) continue;
+      if (matchDeterministico) {
+        tareasObjetivo.add(tarea.tarea_id);
+      }
+    }
+
+    // Fallback para convenciones sin ID (ej: Ajustes/Usuario-Descripcion):
+    // intenta por similitud del título de tarea en rama/título de PR.
+    // Solo aplica si no hubo match determinístico y si el match textual es único.
+    if (tareasObjetivo.size === 0) {
+      const candidatosTexto: Array<{ tarea_id: string; score: number }> = [];
+      for (const tarea of tareas) {
+        const tituloNorm = this.normalizarTexto(tarea.titulo);
+        const tokens = tituloNorm.split(' ').filter((t) => t.length >= 5);
+        if (tokens.length < 2) continue;
+        const presentes = tokens.filter(
+          (t) => textoBusqueda.includes(t) || textoRama.includes(t),
+        ).length;
+        const score = presentes / tokens.length;
+        if (score >= 0.6 && presentes >= 2) {
+          candidatosTexto.push({ tarea_id: tarea.tarea_id, score });
+        }
+      }
+      candidatosTexto.sort((a, b) => b.score - a.score);
+      if (
+        candidatosTexto.length === 1 ||
+        (candidatosTexto.length > 1 &&
+          candidatosTexto[0].score >= 0.85 &&
+          candidatosTexto[0].score > candidatosTexto[1].score)
+      ) {
+        tareasObjetivo.add(candidatosTexto[0].tarea_id);
+      }
+    }
+
+    if (tareasObjetivo.size === 0) return;
+
+    for (const tarea of tareas) {
+      if (!tareasObjetivo.has(tarea.tarea_id)) continue;
 
       const existe = await this.db.queryOne<{ existe: number }>(
         `SELECT TOP 1 1 AS existe
