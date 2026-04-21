@@ -70,6 +70,8 @@ export interface ArchivoPullRequestGithub {
   adiciones: number;
   eliminaciones: number;
   cambios: number;
+  patch: string | null;
+  es_binario: boolean;
 }
 
 interface RamaGithub {
@@ -438,6 +440,7 @@ export class GithubService {
       additions?: number;
       deletions?: number;
       changes?: number;
+      patch?: string;
     }>;
     return data.map((f) => ({
       nombre_archivo: f.filename ?? '',
@@ -445,6 +448,8 @@ export class GithubService {
       adiciones: f.additions ?? 0,
       eliminaciones: f.deletions ?? 0,
       cambios: f.changes ?? 0,
+      patch: f.patch ?? null,
+      es_binario: !f.patch,
     }));
   }
 
