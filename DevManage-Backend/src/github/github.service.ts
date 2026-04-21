@@ -11,6 +11,7 @@ import { VincularRepositorioDto } from './dto/vincular-repositorio.dto';
 
 interface RepositorioGithub {
   repositorio_id: string;
+  nombre_completo_github?: string;
 }
 
 export interface RepositorioResumen {
@@ -61,6 +62,14 @@ export interface RepositorioGithubUsuario extends RepositorioGithubPublico {
   actualizado_en: string;
   vinculado_en_devmanage: boolean;
   repositorio_devmanage_id: string | null;
+}
+
+export interface ArchivoPullRequestGithub {
+  nombre_archivo: string;
+  estado: string;
+  adiciones: number;
+  eliminaciones: number;
+  cambios: number;
 }
 
 interface RamaGithub {
@@ -232,6 +241,7 @@ export class GithubService {
   async vincularRepositorio(
     dto: VincularRepositorioDto,
     usuarioId: string,
+    tokenGithub?: string,
   ): Promise<RepositorioResumen> {
     await this.validarAccesoProyecto(dto.proyecto_id, usuarioId);
 
@@ -278,7 +288,164 @@ export class GithubService {
       throw new ForbiddenException('No fue posible vincular el repositorio');
     }
 
+    if (tokenGithub) {
+      await this.sincronizarRepositorio(repositorio.repositorio_id, tokenGithub, usuarioId);
+    }
+
     return repositorio;
+  }
+
+  async sincronizarRepositorio(
+    repositorioId: string,
+    tokenGithub: string,
+    usuarioId: string,
+  ): Promise<{ ramas: number; prs: number }> {
+    const repo = await this.db.queryOne<{
+      repositorio_id: string;
+      proyecto_id: string;
+      nombre_completo_github: string;
+    }>(
+      `SELECT TOP 1 repositorio_id, proyecto_id, nombre_completo_github
+      FROM github.Repositorios
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repositorioId },
+    );
+    if (!repo) throw new NotFoundException('Repositorio no encontrado en DevManage');
+
+    await this.validarAccesoProyecto(repo.proyecto_id, usuarioId);
+    const fullName = repo.nombre_completo_github;
+    const encoded = encodeURI(fullName);
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${tokenGithub}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+    };
+
+    const ramasRes = await fetch(`https://api.github.com/repos/${encoded}/branches?per_page=100`, { headers });
+    if (ramasRes.status === 401) {
+      throw new BadRequestException('Tu sesión de GitHub expiró. Desconecta y conecta de nuevo.');
+    }
+    if (!ramasRes.ok) {
+      throw new BadRequestException(`No se pudieron leer ramas de GitHub (${ramasRes.status})`);
+    }
+    const ramas = (await ramasRes.json()) as Array<{ name?: string; commit?: { sha?: string } }>;
+    for (const rama of ramas) {
+      if (!rama.name) continue;
+      await this.db.query(
+        `MERGE github.Ramas AS destino
+        USING (SELECT @repositorio_id AS repositorio_id, @nombre AS nombre) AS origen
+        ON destino.repositorio_id = origen.repositorio_id
+           AND destino.nombre = origen.nombre
+        WHEN MATCHED THEN
+          UPDATE SET
+            sha_cabeza = @sha_cabeza,
+            esta_activa = 1,
+            ultimo_push_en = SYSUTCDATETIME()
+        WHEN NOT MATCHED THEN
+          INSERT (repositorio_id, nombre, sha_cabeza, esta_activa, ultimo_push_en)
+          VALUES (@repositorio_id, @nombre, @sha_cabeza, 1, SYSUTCDATETIME());`,
+        {
+          repositorio_id: repo.repositorio_id,
+          nombre: rama.name,
+          sha_cabeza: rama.commit?.sha ?? '',
+        },
+      );
+    }
+
+    const prsRes = await fetch(`https://api.github.com/repos/${encoded}/pulls?state=all&per_page=100`, { headers });
+    if (!prsRes.ok) {
+      throw new BadRequestException(`No se pudieron leer pull requests de GitHub (${prsRes.status})`);
+    }
+    const prs = (await prsRes.json()) as Array<{
+      number?: number;
+      title?: string;
+      state?: string;
+      merged_at?: string | null;
+      head?: { ref?: string };
+      base?: { ref?: string };
+      user?: { login?: string };
+      body?: string;
+      comments?: number;
+      draft?: boolean;
+      created_at?: string;
+      closed_at?: string | null;
+    }>;
+    for (const pr of prs) {
+      if (!pr.number) continue;
+      const estado = pr.merged_at ? 'integrada' : pr.state === 'open' ? 'abierta' : 'cerrada';
+      await this.db.execute('github.pa_InsertarSolicitudIntegracion', {
+        repositorio_id: repo.repositorio_id,
+        numero_github: pr.number,
+        titulo: pr.title ?? '',
+        estado,
+        rama_origen: pr.head?.ref ?? '',
+        rama_destino: pr.base?.ref ?? '',
+        usuario_github_autor: pr.user?.login ?? null,
+        resumen_descripcion: (pr.body ?? '').slice(0, 1000),
+        total_confirmaciones: 0,
+        total_comentarios: pr.comments ?? 0,
+        lineas_agregadas: 0,
+        lineas_eliminadas: 0,
+        archivos_cambiados: 0,
+        es_borrador: pr.draft ? 1 : 0,
+        abierta_en: pr.created_at ?? new Date().toISOString(),
+        integrada_en: pr.merged_at ?? null,
+        cerrada_en: pr.closed_at ?? null,
+      });
+    }
+
+    return { ramas: ramas.length, prs: prs.length };
+  }
+
+  async obtenerArchivosPullRequest(
+    repositorioId: string,
+    numeroPullRequest: number,
+    tokenGithub: string,
+    usuarioId: string,
+  ): Promise<ArchivoPullRequestGithub[]> {
+    const repo = await this.db.queryOne<{
+      repositorio_id: string;
+      proyecto_id: string;
+      nombre_completo_github: string;
+    }>(
+      `SELECT TOP 1 repositorio_id, proyecto_id, nombre_completo_github
+      FROM github.Repositorios
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repositorioId },
+    );
+    if (!repo) throw new NotFoundException('Repositorio no encontrado en DevManage');
+    await this.validarAccesoProyecto(repo.proyecto_id, usuarioId);
+
+    const encoded = encodeURI(repo.nombre_completo_github);
+    const res = await fetch(
+      `https://api.github.com/repos/${encoded}/pulls/${numeroPullRequest}/files?per_page=100`,
+      {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${tokenGithub}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      },
+    );
+    if (!res.ok) {
+      throw new BadRequestException(
+        `No se pudieron leer archivos del PR #${numeroPullRequest} (${res.status})`,
+      );
+    }
+    const data = (await res.json()) as Array<{
+      filename?: string;
+      status?: string;
+      additions?: number;
+      deletions?: number;
+      changes?: number;
+    }>;
+    return data.map((f) => ({
+      nombre_archivo: f.filename ?? '',
+      estado: f.status ?? 'modified',
+      adiciones: f.additions ?? 0,
+      eliminaciones: f.deletions ?? 0,
+      cambios: f.changes ?? 0,
+    }));
   }
 
   async obtenerRepositoriosPorProyecto(

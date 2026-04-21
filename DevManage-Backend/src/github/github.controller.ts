@@ -18,6 +18,7 @@ import { JwtGuard } from '../auth/guards/jwt.guard';
 import { VincularRepositorioDto } from './dto/vincular-repositorio.dto';
 import { GithubService } from './github.service';
 import type {
+  ArchivoPullRequestGithub,
   RamaResumen,
   RepositorioGithubPublico,
   RepositorioGithubUsuario,
@@ -73,7 +74,9 @@ export class GithubController {
     @Body() dto: VincularRepositorioDto,
     @UsuarioActual('sub') usuarioId: string,
   ): Promise<RepositorioResumen> {
-    return this.githubService.vincularRepositorio(dto, usuarioId);
+    return this.authService
+      .obtenerTokenGithubAcceso(usuarioId)
+      .then((tokenGithub) => this.githubService.vincularRepositorio(dto, usuarioId, tokenGithub));
   }
 
   @ApiBearerAuth()
@@ -108,6 +111,47 @@ export class GithubController {
   ): Promise<SolicitudIntegracionResumen[]> {
     return this.githubService.obtenerSolicitudesIntegracionPorRepositorio(
       repositorioId,
+      usuarioId,
+    );
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Sincronizar ramas y PRs existentes desde GitHub' })
+  @UseGuards(JwtGuard)
+  @Post('repositorios/:repositorio_id/sincronizar')
+  async sincronizarRepositorio(
+    @Param('repositorio_id') repositorioId: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<{ estado: string; ramas: number; prs: number }> {
+    const tokenGithub = await this.authService.obtenerTokenGithubAcceso(usuarioId);
+    if (!tokenGithub) {
+      throw new UnauthorizedException('Primero conecta tu cuenta de GitHub.');
+    }
+    const resultado = await this.githubService.sincronizarRepositorio(
+      repositorioId,
+      tokenGithub,
+      usuarioId,
+    );
+    return { estado: 'ok', ...resultado };
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Listar archivos cambiados en un pull request' })
+  @UseGuards(JwtGuard)
+  @Get('repositorios/:repositorio_id/solicitudes-integracion/:numero/archivos')
+  async obtenerArchivosPullRequest(
+    @Param('repositorio_id') repositorioId: string,
+    @Param('numero') numero: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<ArchivoPullRequestGithub[]> {
+    const tokenGithub = await this.authService.obtenerTokenGithubAcceso(usuarioId);
+    if (!tokenGithub) {
+      throw new UnauthorizedException('Primero conecta tu cuenta de GitHub.');
+    }
+    return this.githubService.obtenerArchivosPullRequest(
+      repositorioId,
+      parseInt(numero, 10),
+      tokenGithub,
       usuarioId,
     );
   }
