@@ -19,12 +19,15 @@ import { VincularRepositorioDto } from './dto/vincular-repositorio.dto';
 import { GithubService } from './github.service';
 import type {
   ArchivoPullRequestGithub,
+  CommitGithubResumen,
+  EventoProduccionResumen,
   EstadoDespliegueRepositorio,
   RamaResumen,
   RepositorioGithubPublico,
   RepositorioGithubUsuario,
   RepositorioResumen,
   SolicitudIntegracionResumen,
+  TrazabilidadTareaEvento,
 } from './github.service';
 
 type RequestConRawBody = Request & { rawBody?: Buffer };
@@ -158,6 +161,45 @@ export class GithubController {
   }
 
   @ApiBearerAuth()
+  @ApiOperation({ summary: 'Listar commits del repositorio (opcional por rama y texto)' })
+  @UseGuards(JwtGuard)
+  @Get('repositorios/:repositorio_id/commits')
+  obtenerCommitsPorRepositorio(
+    @Param('repositorio_id') repositorioId: string,
+    @UsuarioActual('sub') usuarioId: string,
+    @Query('rama') rama?: string,
+    @Query('q') q?: string,
+    @Query('limit') limit?: string,
+  ): Promise<CommitGithubResumen[]> {
+    return this.githubService.obtenerCommitsPorRepositorio(repositorioId, usuarioId, {
+      rama,
+      q,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Listar commits de un pull request' })
+  @UseGuards(JwtGuard)
+  @Get('repositorios/:repositorio_id/solicitudes-integracion/:numero/commits')
+  async obtenerCommitsPullRequest(
+    @Param('repositorio_id') repositorioId: string,
+    @Param('numero') numero: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<CommitGithubResumen[]> {
+    const tokenGithub = await this.authService.obtenerTokenGithubAcceso(usuarioId);
+    if (!tokenGithub) {
+      throw new UnauthorizedException('Primero conecta tu cuenta de GitHub.');
+    }
+    return this.githubService.obtenerCommitsPullRequest(
+      repositorioId,
+      parseInt(numero, 10),
+      tokenGithub,
+      usuarioId,
+    );
+  }
+
+  @ApiBearerAuth()
   @ApiOperation({ summary: 'Estado de despliegue por ramas (desarrollo/main-prueba/main)' })
   @UseGuards(JwtGuard)
   @Get('repositorios/:repositorio_id/estado-despliegue')
@@ -177,6 +219,33 @@ export class GithubController {
     @UsuarioActual('sub') usuarioId: string,
   ): Promise<Array<{ tarea_id: string; titulo: string; solicitud_numero: number | null; rama: string | null }>> {
     return this.githubService.obtenerVinculosTareas(repositorioId, usuarioId);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Línea de tiempo completa de trazabilidad para una tarea' })
+  @UseGuards(JwtGuard)
+  @Get('repositorios/:repositorio_id/tareas/:tarea_id/trazabilidad')
+  obtenerTrazabilidadTarea(
+    @Param('repositorio_id') repositorioId: string,
+    @Param('tarea_id') tareaId: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<TrazabilidadTareaEvento[]> {
+    return this.githubService.obtenerTrazabilidadTarea(repositorioId, tareaId, usuarioId);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Eventos reales de despliegue a producción (PR integrados a main)' })
+  @UseGuards(JwtGuard)
+  @Get('repositorios/:repositorio_id/eventos-produccion')
+  async obtenerEventosProduccion(
+    @Param('repositorio_id') repositorioId: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<EventoProduccionResumen[]> {
+    const tokenGithub = await this.authService.obtenerTokenGithubAcceso(usuarioId);
+    if (!tokenGithub) {
+      throw new UnauthorizedException('Primero conecta tu cuenta de GitHub.');
+    }
+    return this.githubService.obtenerEventosProduccion(repositorioId, tokenGithub, usuarioId);
   }
 
   // Endpoint público — sin guard intencionalmente

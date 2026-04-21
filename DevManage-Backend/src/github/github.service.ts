@@ -12,6 +12,7 @@ import { VincularRepositorioDto } from './dto/vincular-repositorio.dto';
 interface RepositorioGithub {
   repositorio_id: string;
   nombre_completo_github?: string;
+  proyecto_id?: string;
 }
 
 export interface RepositorioResumen {
@@ -81,6 +82,42 @@ export interface EstadoDespliegueRepositorio {
   prs_abiertas: { a_desarrollo: number; a_main_prueba: number; a_main: number };
 }
 
+export interface CommitGithubResumen {
+  sha: string;
+  mensaje: string;
+  usuario_github_autor: string | null;
+  nombre_autor: string | null;
+  confirmado_en: string;
+  rama: string | null;
+}
+
+export interface TrazabilidadTareaEvento {
+  tipo:
+    | 'rama_creada'
+    | 'commit'
+    | 'pr_desarrollo'
+    | 'pr_main_prueba'
+    | 'pr_main'
+    | 'pr_otra';
+  ocurrido_en: string;
+  rama: string | null;
+  sha: string | null;
+  pr_numero: number | null;
+  titulo: string;
+  estado_pr: string | null;
+  rama_destino: string | null;
+}
+
+export interface EventoProduccionResumen {
+  pr_numero: number;
+  titulo: string;
+  rama_origen: string;
+  rama_destino: string;
+  merge_commit_sha: string | null;
+  integrada_en: string | null;
+  usuario_github_autor: string | null;
+}
+
 interface RamaGithub {
   rama_id: string;
 }
@@ -131,6 +168,7 @@ interface PullRequestPayload {
     deletions?: number;
     changed_files?: number;
     draft?: boolean;
+    merge_commit_sha?: string | null;
     created_at?: string;
     merged_at?: string | null;
     closed_at?: string | null;
@@ -228,6 +266,7 @@ export class GithubService {
     ramaOrigen: string;
     textoBusqueda: string;
     actorId?: string;
+    numeroPullRequest?: number;
   }): Promise<void> {
     const tareas = await this.db.query<{ tarea_id: string; titulo: string }>(
       `SELECT tarea_id, titulo
@@ -248,17 +287,7 @@ export class GithubService {
     const candidatos = this.extraerCandidatosTarea(args.textoBusqueda);
     const textoRama = this.normalizarTexto(args.ramaOrigen.replace(/[-_/]/g, ' '));
     const textoBusqueda = this.normalizarTexto(args.textoBusqueda);
-    const actorId =
-      args.actorId ??
-      (
-        await this.db.queryOne<{ usuario_id: string }>(
-          `SELECT TOP 1 usuario_id
-          FROM nucleo.MiembrosProyecto
-          WHERE proyecto_id = @proyecto_id
-          ORDER BY CASE WHEN rol = 'propietario' THEN 0 ELSE 1 END, unido_en ASC`,
-          { proyecto_id: args.proyectoId },
-        )
-      )?.usuario_id;
+    const actorId = args.actorId ?? (await this.resolverActorProyecto(args.proyectoId));
     if (!actorId) return;
 
     const tareasObjetivo = new Set<string>();
@@ -314,6 +343,42 @@ export class GithubService {
       );
       if (existe) continue;
 
+      // Si ya existe vínculo para la misma tarea+rama, mantener solo la PR más reciente.
+      if (rama?.rama_id && args.numeroPullRequest) {
+        const vinculoRama = await this.db.queryOne<{
+          vinculo_id: string;
+          numero_github: number | null;
+        }>(
+          `SELECT TOP 1 v.vinculo_id, si.numero_github
+          FROM github.VinculosTareaGithub v
+          LEFT JOIN github.SolicitudesIntegracion si ON si.solicitud_id = v.solicitud_id
+          WHERE v.tarea_id = @tarea_id
+            AND v.rama_id = @rama_id
+            AND v.solicitud_id IS NOT NULL
+          ORDER BY ISNULL(si.numero_github, 0) DESC`,
+          { tarea_id: tarea.tarea_id, rama_id: rama.rama_id },
+        );
+
+        if (vinculoRama?.vinculo_id) {
+          if ((vinculoRama.numero_github ?? 0) >= args.numeroPullRequest) {
+            continue;
+          }
+          await this.db.query(
+            `UPDATE github.VinculosTareaGithub
+            SET solicitud_id = @solicitud_id,
+                vinculado_por = @vinculado_por,
+                vinculado_en = SYSUTCDATETIME()
+            WHERE vinculo_id = @vinculo_id`,
+            {
+              vinculo_id: vinculoRama.vinculo_id,
+              solicitud_id: args.solicitudId,
+              vinculado_por: actorId,
+            },
+          );
+          continue;
+        }
+      }
+
       await this.db.query(
         `INSERT INTO github.VinculosTareaGithub (tarea_id, rama_id, solicitud_id, vinculado_por)
         VALUES (@tarea_id, @rama_id, @solicitud_id, @vinculado_por)`,
@@ -323,6 +388,77 @@ export class GithubService {
           solicitud_id: args.solicitudId,
           vinculado_por: actorId,
         },
+      );
+    }
+  }
+
+  private async resolverActorProyecto(proyectoId: string): Promise<string | null> {
+    return (
+      (
+        await this.db.queryOne<{ usuario_id: string }>(
+          `SELECT TOP 1 usuario_id
+          FROM nucleo.MiembrosProyecto
+          WHERE proyecto_id = @proyecto_id
+          ORDER BY CASE WHEN rol = 'propietario' THEN 0 ELSE 1 END, unido_en ASC`,
+          { proyecto_id: proyectoId },
+        )
+      )?.usuario_id ?? null
+    );
+  }
+
+  private async autoVincularTareasPorRama(args: {
+    repositorioId: string;
+    proyectoId: string;
+    ramaId: string;
+    nombreRama: string;
+  }): Promise<void> {
+    const tareas = await this.db.query<{ tarea_id: string; titulo: string }>(
+      `SELECT tarea_id, titulo
+      FROM tablero.Tareas
+      WHERE proyecto_id = @proyecto_id`,
+      { proyecto_id: args.proyectoId },
+    );
+    if (!tareas.length) return;
+
+    const textoRama = this.normalizarTexto(args.nombreRama.replace(/[-_/]/g, ' '));
+    const actorId = await this.resolverActorProyecto(args.proyectoId);
+    if (!actorId) return;
+
+    const candidatosTexto: Array<{ tarea_id: string; score: number }> = [];
+    for (const tarea of tareas) {
+      const tituloNorm = this.normalizarTexto(tarea.titulo);
+      const tokens = tituloNorm.split(' ').filter((t) => t.length >= 5);
+      if (tokens.length < 2) continue;
+      const presentes = tokens.filter((t) => textoRama.includes(t)).length;
+      const score = presentes / tokens.length;
+      if (score >= 0.6 && presentes >= 2) {
+        candidatosTexto.push({ tarea_id: tarea.tarea_id, score });
+      }
+    }
+    candidatosTexto.sort((a, b) => b.score - a.score);
+    const targets: string[] = [];
+    if (
+      candidatosTexto.length === 1 ||
+      (candidatosTexto.length > 1 &&
+        candidatosTexto[0].score >= 0.85 &&
+        candidatosTexto[0].score > candidatosTexto[1].score)
+    ) {
+      targets.push(candidatosTexto[0].tarea_id);
+    }
+
+    for (const tareaId of targets) {
+      const existe = await this.db.queryOne<{ existe: number }>(
+        `SELECT TOP 1 1 AS existe
+        FROM github.VinculosTareaGithub
+        WHERE tarea_id = @tarea_id
+          AND rama_id = @rama_id`,
+        { tarea_id: tareaId, rama_id: args.ramaId },
+      );
+      if (existe) continue;
+      await this.db.query(
+        `INSERT INTO github.VinculosTareaGithub (tarea_id, rama_id, vinculado_por)
+        VALUES (@tarea_id, @rama_id, @vinculado_por)`,
+        { tarea_id: tareaId, rama_id: args.ramaId, vinculado_por: actorId },
       );
     }
   }
@@ -570,6 +706,7 @@ export class GithubService {
           ramaOrigen: pr.head?.ref ?? '',
           textoBusqueda: `${pr.title ?? ''} ${pr.body ?? ''} ${pr.head?.ref ?? ''}`,
           actorId: usuarioId,
+          numeroPullRequest: pr.number,
         });
       }
     }
@@ -628,6 +765,90 @@ export class GithubService {
       cambios: f.changes ?? 0,
       patch: f.patch ?? null,
       es_binario: !f.patch,
+    }));
+  }
+
+  async obtenerCommitsPorRepositorio(
+    repositorioId: string,
+    usuarioId: string,
+    params?: { rama?: string; q?: string; limit?: number },
+  ): Promise<CommitGithubResumen[]> {
+    const repo = await this.db.queryOne<{ proyecto_id: string }>(
+      `SELECT TOP 1 proyecto_id
+      FROM github.Repositorios
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repositorioId },
+    );
+    if (!repo) throw new NotFoundException('Repositorio no encontrado');
+    await this.validarAccesoProyecto(repo.proyecto_id, usuarioId);
+
+    const limit = Math.min(Math.max(params?.limit ?? 200, 1), 500);
+    const q = (params?.q ?? '').trim().toLowerCase();
+
+    const rows = await this.db.query<CommitGithubResumen>(
+      `SELECT TOP (${limit})
+        c.sha,
+        c.mensaje,
+        c.usuario_github_autor,
+        c.nombre_autor,
+        c.confirmado_en,
+        r.nombre AS rama
+      FROM github.Confirmaciones c
+      LEFT JOIN github.Ramas r ON r.rama_id = c.rama_id
+      WHERE c.repositorio_id = @repositorio_id
+        AND (@rama IS NULL OR r.nombre = @rama)
+        AND (
+          @q = ''
+          OR LOWER(c.sha) LIKE '%' + @q + '%'
+          OR LOWER(c.mensaje) LIKE '%' + @q + '%'
+          OR LOWER(ISNULL(c.usuario_github_autor, '')) LIKE '%' + @q + '%'
+          OR LOWER(ISNULL(c.nombre_autor, '')) LIKE '%' + @q + '%'
+        )
+      ORDER BY c.confirmado_en DESC`,
+      { repositorio_id: repositorioId, rama: params?.rama ?? null, q },
+    );
+    return rows;
+  }
+
+  async obtenerCommitsPullRequest(
+    repositorioId: string,
+    numeroPullRequest: number,
+    tokenGithub: string,
+    usuarioId: string,
+  ): Promise<CommitGithubResumen[]> {
+    const repo = await this.db.queryOne<{
+      proyecto_id: string;
+      nombre_completo_github: string;
+    }>(
+      `SELECT TOP 1 proyecto_id, nombre_completo_github
+      FROM github.Repositorios
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repositorioId },
+    );
+    if (!repo) throw new NotFoundException('Repositorio no encontrado');
+    await this.validarAccesoProyecto(repo.proyecto_id, usuarioId);
+
+    const encoded = encodeURI(repo.nombre_completo_github);
+    const commits = await this.fetchGithubPaginado<{
+      sha?: string;
+      commit?: {
+        message?: string;
+        author?: { name?: string; date?: string };
+      };
+      author?: { login?: string };
+    }>(
+      `https://api.github.com/repos/${encoded}/pulls/${numeroPullRequest}/commits?per_page=100`,
+      tokenGithub,
+      10,
+    );
+
+    return commits.map((c) => ({
+      sha: c.sha ?? '',
+      mensaje: c.commit?.message ?? '',
+      usuario_github_autor: c.author?.login ?? null,
+      nombre_autor: c.commit?.author?.name ?? null,
+      confirmado_en: c.commit?.author?.date ?? new Date().toISOString(),
+      rama: null,
     }));
   }
 
@@ -886,6 +1107,160 @@ export class GithubService {
     );
   }
 
+  async obtenerTrazabilidadTarea(
+    repositorioId: string,
+    tareaId: string,
+    usuarioId: string,
+  ): Promise<TrazabilidadTareaEvento[]> {
+    const repo = await this.db.queryOne<{ proyecto_id: string }>(
+      `SELECT TOP 1 proyecto_id
+      FROM github.Repositorios
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repositorioId },
+    );
+    if (!repo) throw new NotFoundException('Repositorio no encontrado');
+    await this.validarAccesoProyecto(repo.proyecto_id, usuarioId);
+
+    const eventos = await this.db.query<{
+      tipo: TrazabilidadTareaEvento['tipo'];
+      ocurrido_en: string;
+      rama: string | null;
+      sha: string | null;
+      pr_numero: number | null;
+      titulo: string;
+      estado_pr: string | null;
+      rama_destino: string | null;
+    }>(
+      `SELECT
+        'rama_creada' AS tipo,
+        MIN(r.ultimo_push_en) AS ocurrido_en,
+        r.nombre AS rama,
+        NULL AS sha,
+        NULL AS pr_numero,
+        CONCAT('Rama detectada: ', r.nombre) AS titulo,
+        NULL AS estado_pr,
+        NULL AS rama_destino
+      FROM github.VinculosTareaGithub v
+      INNER JOIN github.Ramas r ON r.rama_id = v.rama_id
+      WHERE v.tarea_id = @tarea_id
+        AND r.repositorio_id = @repositorio_id
+      GROUP BY r.nombre
+
+      UNION ALL
+
+      SELECT
+        'commit' AS tipo,
+        c.confirmado_en AS ocurrido_en,
+        r.nombre AS rama,
+        c.sha AS sha,
+        NULL AS pr_numero,
+        c.mensaje AS titulo,
+        NULL AS estado_pr,
+        NULL AS rama_destino
+      FROM github.VinculosTareaGithub v
+      INNER JOIN github.Ramas r ON r.rama_id = v.rama_id
+      INNER JOIN github.Confirmaciones c ON c.rama_id = r.rama_id
+      WHERE v.tarea_id = @tarea_id
+        AND r.repositorio_id = @repositorio_id
+
+      UNION ALL
+
+      SELECT
+        CASE
+          WHEN LOWER(si.rama_destino) = 'desarrollo' THEN 'pr_desarrollo'
+          WHEN LOWER(si.rama_destino) IN ('main-prueba', 'main prueba', 'main_prueba') THEN 'pr_main_prueba'
+          WHEN LOWER(si.rama_destino) IN ('main', 'master') THEN 'pr_main'
+          ELSE 'pr_otra'
+        END AS tipo,
+        COALESCE(si.integrada_en, si.cerrada_en, si.abierta_en) AS ocurrido_en,
+        si.rama_origen AS rama,
+        NULL AS sha,
+        si.numero_github AS pr_numero,
+        si.titulo AS titulo,
+        si.estado AS estado_pr,
+        si.rama_destino AS rama_destino
+      FROM github.VinculosTareaGithub v
+      INNER JOIN github.SolicitudesIntegracion si ON si.solicitud_id = v.solicitud_id
+      WHERE v.tarea_id = @tarea_id
+        AND si.repositorio_id = @repositorio_id`,
+      { tarea_id: tareaId, repositorio_id: repositorioId },
+    );
+
+    return eventos.sort(
+      (a, b) => new Date(a.ocurrido_en).getTime() - new Date(b.ocurrido_en).getTime(),
+    );
+  }
+
+  async obtenerEventosProduccion(
+    repositorioId: string,
+    tokenGithub: string,
+    usuarioId: string,
+  ): Promise<EventoProduccionResumen[]> {
+    const repo = await this.db.queryOne<{
+      proyecto_id: string;
+      nombre_completo_github: string;
+    }>(
+      `SELECT TOP 1 proyecto_id, nombre_completo_github
+      FROM github.Repositorios
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repositorioId },
+    );
+    if (!repo) throw new NotFoundException('Repositorio no encontrado');
+    await this.validarAccesoProyecto(repo.proyecto_id, usuarioId);
+
+    const prsMain = await this.db.query<{
+      numero_github: number;
+      titulo: string;
+      rama_origen: string;
+      rama_destino: string;
+      integrada_en: string | null;
+      usuario_github_autor: string | null;
+    }>(
+      `SELECT TOP 100
+        numero_github,
+        titulo,
+        rama_origen,
+        rama_destino,
+        integrada_en,
+        usuario_github_autor
+      FROM github.SolicitudesIntegracion
+      WHERE repositorio_id = @repositorio_id
+        AND estado = 'integrada'
+        AND LOWER(rama_destino) IN ('main', 'master')
+      ORDER BY integrada_en DESC`,
+      { repositorio_id: repositorioId },
+    );
+
+    const encoded = encodeURI(repo.nombre_completo_github);
+    const detalles = await Promise.all(
+      prsMain.map(async (pr) => {
+        const res = await fetch(
+          `https://api.github.com/repos/${encoded}/pulls/${pr.numero_github}`,
+          { headers: this.headersGithub(tokenGithub) },
+        );
+        if (!res.ok) {
+          return { pr_numero: pr.numero_github, merge_commit_sha: null as string | null };
+        }
+        const json = (await res.json()) as { number?: number; merge_commit_sha?: string | null };
+        return {
+          pr_numero: json.number ?? pr.numero_github,
+          merge_commit_sha: json.merge_commit_sha ?? null,
+        };
+      }),
+    );
+    const shaPorPr = new Map(detalles.map((d) => [d.pr_numero, d.merge_commit_sha]));
+
+    return prsMain.map((pr) => ({
+      pr_numero: pr.numero_github,
+      titulo: pr.titulo,
+      rama_origen: pr.rama_origen,
+      rama_destino: pr.rama_destino,
+      merge_commit_sha: shaPorPr.get(pr.numero_github) ?? null,
+      integrada_en: pr.integrada_en,
+      usuario_github_autor: pr.usuario_github_autor,
+    }));
+  }
+
   async procesarEvento(evento: string, payload: unknown): Promise<{ procesado: boolean; detalle: string }> {
     if (evento === 'push') {
       return this.procesarPush(payload as PushPayload);
@@ -905,7 +1280,7 @@ export class GithubService {
     }
 
     return this.db.queryOne<RepositorioGithub>(
-      `SELECT TOP 1 repositorio_id
+      `SELECT TOP 1 repositorio_id, proyecto_id
       FROM github.Repositorios
       WHERE (@id_github IS NOT NULL AND id_github = @id_github)
          OR (@nombre_completo IS NOT NULL AND nombre_completo_github = @nombre_completo)`,
@@ -965,6 +1340,15 @@ export class GithubService {
 
     if (!rama) {
       return { procesado: false, detalle: 'No se pudo determinar la rama del push' };
+    }
+
+    if (repo.proyecto_id) {
+      await this.autoVincularTareasPorRama({
+        repositorioId: repo.repositorio_id,
+        proyectoId: repo.proyecto_id,
+        ramaId: rama.rama_id,
+        nombreRama,
+      });
     }
 
     for (const commit of payload.commits ?? []) {
@@ -1040,6 +1424,7 @@ export class GithubService {
         solicitudId: solicitud.solicitud_id,
         ramaOrigen: pr.head?.ref ?? '',
         textoBusqueda: `${pr.title ?? ''} ${pr.body ?? ''} ${pr.head?.ref ?? ''}`,
+        numeroPullRequest: pr.number,
       });
     }
 
