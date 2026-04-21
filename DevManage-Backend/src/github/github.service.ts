@@ -138,6 +138,9 @@ interface PushCommitPayload {
 interface PushPayload {
   ref?: string;
   after?: string;
+  head_commit?: {
+    timestamp?: string;
+  };
   repository?: {
     id?: number;
     full_name?: string;
@@ -205,6 +208,23 @@ export class GithubService {
       Authorization: `Bearer ${token}`,
       'X-GitHub-Api-Version': '2022-11-28',
     };
+  }
+
+  private async obtenerFechaUltimoCommitRama(
+    fullName: string,
+    rama: string,
+    token: string,
+  ): Promise<string | null> {
+    const encoded = encodeURI(fullName);
+    const res = await fetch(
+      `https://api.github.com/repos/${encoded}/commits?sha=${encodeURIComponent(rama)}&per_page=1`,
+      { headers: this.headersGithub(token) },
+    );
+    if (!res.ok) return null;
+    const json = (await res.json()) as Array<{
+      commit?: { author?: { date?: string } };
+    }>;
+    return json[0]?.commit?.author?.date ?? null;
   }
 
   private async fetchGithubPaginado<T>(url: string, token: string, maxPaginas = 10): Promise<T[]> {
@@ -633,6 +653,11 @@ export class GithubService {
     );
     for (const rama of ramas) {
       if (!rama.name) continue;
+      const ultimoPush = await this.obtenerFechaUltimoCommitRama(
+        repo.nombre_completo_github,
+        rama.name,
+        tokenGithub,
+      );
       await this.db.query(
         `MERGE github.Ramas AS destino
         USING (SELECT @repositorio_id AS repositorio_id, @nombre AS nombre) AS origen
@@ -642,16 +667,58 @@ export class GithubService {
           UPDATE SET
             sha_cabeza = @sha_cabeza,
             esta_activa = 1,
-            ultimo_push_en = SYSUTCDATETIME()
+            ultimo_push_en = COALESCE(@ultimo_push_en, SYSUTCDATETIME())
         WHEN NOT MATCHED THEN
           INSERT (repositorio_id, nombre, sha_cabeza, esta_activa, ultimo_push_en)
-          VALUES (@repositorio_id, @nombre, @sha_cabeza, 1, SYSUTCDATETIME());`,
+          VALUES (@repositorio_id, @nombre, @sha_cabeza, 1, COALESCE(@ultimo_push_en, SYSUTCDATETIME()));`,
         {
           repositorio_id: repo.repositorio_id,
           nombre: rama.name,
           sha_cabeza: rama.commit?.sha ?? '',
+          ultimo_push_en: ultimoPush,
         },
       );
+    }
+
+    // Backfill de commits para que la pestaña de commits tenga datos
+    // aun cuando no hayan llegado webhooks recientes.
+    for (const rama of ramas.slice(0, 25)) {
+      if (!rama.name) continue;
+      const commitsRama = await this.fetchGithubPaginado<{
+        sha?: string;
+        commit?: {
+          message?: string;
+          author?: { name?: string; date?: string };
+        };
+        author?: { login?: string };
+      }>(
+        `https://api.github.com/repos/${encoded}/commits?sha=${encodeURIComponent(rama.name)}&per_page=20`,
+        tokenGithub,
+        1,
+      );
+      const ramaDb = await this.db.queryOne<{ rama_id: string }>(
+        `SELECT TOP 1 rama_id
+        FROM github.Ramas
+        WHERE repositorio_id = @repositorio_id
+          AND nombre = @nombre`,
+        { repositorio_id: repo.repositorio_id, nombre: rama.name },
+      );
+      if (!ramaDb?.rama_id) continue;
+      for (const c of commitsRama) {
+        if (!c.sha) continue;
+        await this.db.execute('github.pa_InsertarConfirmacion', {
+          repositorio_id: repo.repositorio_id,
+          rama_id: ramaDb.rama_id,
+          sha: c.sha,
+          mensaje: c.commit?.message ?? '',
+          usuario_github_autor: c.author?.login ?? null,
+          nombre_autor: c.commit?.author?.name ?? null,
+          lineas_agregadas: 0,
+          lineas_eliminadas: 0,
+          archivos_cambiados: 0,
+          confirmado_en: c.commit?.author?.date ?? new Date().toISOString(),
+        });
+      }
     }
 
     const prs = await this.fetchGithubPaginado<{
@@ -1316,14 +1383,15 @@ export class GithubService {
         UPDATE SET
           sha_cabeza = @sha_cabeza,
           esta_activa = 1,
-          ultimo_push_en = SYSUTCDATETIME()
+          ultimo_push_en = COALESCE(@ultimo_push_en, SYSUTCDATETIME())
       WHEN NOT MATCHED THEN
         INSERT (repositorio_id, nombre, sha_cabeza, esta_activa, ultimo_push_en)
-        VALUES (@repositorio_id, @nombre, @sha_cabeza, 1, SYSUTCDATETIME());`,
+        VALUES (@repositorio_id, @nombre, @sha_cabeza, 1, COALESCE(@ultimo_push_en, SYSUTCDATETIME()));`,
       {
         repositorio_id: repo.repositorio_id,
         nombre: nombreRama,
         sha_cabeza: shaCabeza,
+        ultimo_push_en: payload.head_commit?.timestamp ?? null,
       },
     );
 
