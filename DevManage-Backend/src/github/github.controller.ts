@@ -20,6 +20,7 @@ import { GithubService } from './github.service';
 import type {
   RamaResumen,
   RepositorioGithubPublico,
+  RepositorioGithubUsuario,
   RepositorioResumen,
   SolicitudIntegracionResumen,
 } from './github.service';
@@ -47,6 +48,21 @@ export class GithubController {
   ): Promise<RepositorioGithubPublico> {
     const tokenUsuario = await this.authService.obtenerTokenGithubAcceso(usuarioId);
     return this.githubService.resolverRepositorio(fullName ?? '', tokenUsuario);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Listar repositorios del usuario autenticado en GitHub' })
+  @UseGuards(JwtGuard)
+  @Get('repos/mios')
+  async listarRepositoriosUsuario(
+    @UsuarioActual('sub') usuarioId: string,
+    @Query('proyecto_id') proyectoId?: string,
+  ): Promise<RepositorioGithubUsuario[]> {
+    const tokenUsuario = await this.authService.obtenerTokenGithubAcceso(usuarioId);
+    if (!tokenUsuario) {
+      throw new UnauthorizedException('Primero conecta tu cuenta de GitHub.');
+    }
+    return this.githubService.listarRepositoriosUsuario(tokenUsuario, proyectoId, usuarioId);
   }
 
   @ApiBearerAuth()

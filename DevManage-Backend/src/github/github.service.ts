@@ -56,6 +56,13 @@ export interface RepositorioGithubPublico {
   html_url: string;
 }
 
+export interface RepositorioGithubUsuario extends RepositorioGithubPublico {
+  privado: boolean;
+  actualizado_en: string;
+  vinculado_en_devmanage: boolean;
+  repositorio_devmanage_id: string | null;
+}
+
 interface RamaGithub {
   rama_id: string;
 }
@@ -294,6 +301,83 @@ export class GithubService {
       ORDER BY creado_en DESC`,
       { proyecto_id: proyectoId },
     );
+  }
+
+  async listarRepositoriosUsuario(
+    tokenGithub: string,
+    proyectoId?: string,
+    usuarioId?: string,
+  ): Promise<RepositorioGithubUsuario[]> {
+    if (proyectoId && usuarioId) {
+      await this.validarAccesoProyecto(proyectoId, usuarioId);
+    }
+
+    const respuesta = await fetch(
+      'https://api.github.com/user/repos?per_page=100&sort=updated&type=all',
+      {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${tokenGithub}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      },
+    );
+
+    if (respuesta.status === 401) {
+      throw new BadRequestException('Tu sesión de GitHub expiró. Desconecta y conecta de nuevo.');
+    }
+    if (!respuesta.ok) {
+      throw new BadRequestException(`No se pudo listar repositorios de GitHub (${respuesta.status})`);
+    }
+
+    const repos = (await respuesta.json()) as Array<{
+      id: number;
+      full_name: string;
+      default_branch: string | null;
+      description: string | null;
+      html_url: string;
+      private: boolean;
+      updated_at: string;
+    }>;
+
+    if (!repos.length) return [];
+
+    const params: Record<string, unknown> = {};
+    const inClauses: string[] = [];
+    repos.forEach((r, index) => {
+      const key = `id_${index}`;
+      params[key] = r.id;
+      inClauses.push(`@${key}`);
+    });
+
+    const vinculados = await this.db.query<{
+      id_github: number;
+      repositorio_id: string;
+      proyecto_id: string;
+    }>(
+      `SELECT id_github, repositorio_id, proyecto_id
+      FROM github.Repositorios
+      WHERE id_github IN (${inClauses.join(', ')})`,
+      params,
+    );
+
+    const vinculadosPorId = new Map(vinculados.map((v) => [v.id_github, v]));
+
+    return repos.map((r) => {
+      const vinculado = vinculadosPorId.get(r.id);
+      const correspondeProyecto = proyectoId ? vinculado?.proyecto_id === proyectoId : Boolean(vinculado);
+      return {
+        id_github: r.id,
+        nombre_completo_github: r.full_name,
+        rama_principal: r.default_branch ?? 'main',
+        descripcion: r.description ?? null,
+        html_url: r.html_url,
+        privado: Boolean(r.private),
+        actualizado_en: r.updated_at,
+        vinculado_en_devmanage: correspondeProyecto,
+        repositorio_devmanage_id: vinculado?.repositorio_id ?? null,
+      };
+    });
   }
 
   async obtenerRamasPorRepositorio(
