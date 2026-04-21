@@ -19,6 +19,7 @@ import { VincularRepositorioDto } from './dto/vincular-repositorio.dto';
 import { GithubService } from './github.service';
 import type {
   ArchivoPullRequestGithub,
+  EstadoDespliegueRepositorio,
   RamaResumen,
   RepositorioGithubPublico,
   RepositorioGithubUsuario,
@@ -154,6 +155,28 @@ export class GithubController {
       tokenGithub,
       usuarioId,
     );
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Estado de despliegue por ramas (desarrollo/main-prueba/main)' })
+  @UseGuards(JwtGuard)
+  @Get('repositorios/:repositorio_id/estado-despliegue')
+  obtenerEstadoDespliegue(
+    @Param('repositorio_id') repositorioId: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<EstadoDespliegueRepositorio> {
+    return this.githubService.obtenerEstadoDespliegue(repositorioId, usuarioId);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Listar vínculos automáticos tarea ↔ PR/rama del repositorio' })
+  @UseGuards(JwtGuard)
+  @Get('repositorios/:repositorio_id/vinculos-tareas')
+  obtenerVinculosTareas(
+    @Param('repositorio_id') repositorioId: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<Array<{ tarea_id: string; titulo: string; solicitud_numero: number | null; rama: string | null }>> {
+    return this.githubService.obtenerVinculosTareas(repositorioId, usuarioId);
   }
 
   // Endpoint público — sin guard intencionalmente

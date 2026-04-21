@@ -74,6 +74,13 @@ export interface ArchivoPullRequestGithub {
   es_binario: boolean;
 }
 
+export interface EstadoDespliegueRepositorio {
+  rama_desarrollo: { nombre: string; sha: string | null; ultimo_push_en: string | null };
+  rama_main_prueba: { nombre: string; sha: string | null; ultimo_push_en: string | null };
+  rama_main: { nombre: string; sha: string | null; ultimo_push_en: string | null };
+  prs_abiertas: { a_desarrollo: number; a_main_prueba: number; a_main: number };
+}
+
 interface RamaGithub {
   rama_id: string;
 }
@@ -152,6 +159,136 @@ export class GithubService {
     }
 
     return timingSafeEqual(firmaBuffer, esperadoBuffer);
+  }
+
+  private headersGithub(token: string): Record<string, string> {
+    return {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+    };
+  }
+
+  private async fetchGithubPaginado<T>(url: string, token: string, maxPaginas = 10): Promise<T[]> {
+    let nextUrl: string | null = url;
+    const acumulado: T[] = [];
+    let pagina = 0;
+    while (nextUrl && pagina < maxPaginas) {
+      const res = await fetch(nextUrl, { headers: this.headersGithub(token) });
+      if (!res.ok) {
+        throw new BadRequestException(`GitHub respondió ${res.status} al paginar ${url}`);
+      }
+      const json = (await res.json()) as T[];
+      acumulado.push(...json);
+      const link = res.headers.get('link') ?? '';
+      const match = link.match(/<([^>]+)>;\s*rel="next"/);
+      nextUrl = match?.[1] ?? null;
+      pagina += 1;
+    }
+    return acumulado;
+  }
+
+  private normalizarTexto(texto: string): string {
+    return texto
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9\s-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private extraerCandidatosTarea(texto: string): { idsCortos: Set<string>; idsCompletos: Set<string> } {
+    const raw = texto.toLowerCase();
+    const idsCortos = new Set<string>();
+    const idsCompletos = new Set<string>();
+
+    const reDm = /\bdm-([0-9a-f]{8})\b/g;
+    let m = reDm.exec(raw);
+    while (m) {
+      idsCortos.add(m[1]);
+      m = reDm.exec(raw);
+    }
+
+    const reUuid = /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/g;
+    let u = reUuid.exec(raw);
+    while (u) {
+      idsCompletos.add(u[1]);
+      idsCortos.add(u[1].slice(0, 8));
+      u = reUuid.exec(raw);
+    }
+
+    return { idsCortos, idsCompletos };
+  }
+
+  private async autoVincularTareasPorPullRequest(args: {
+    repositorioId: string;
+    proyectoId: string;
+    solicitudId: string;
+    ramaOrigen: string;
+    textoBusqueda: string;
+    actorId?: string;
+  }): Promise<void> {
+    const tareas = await this.db.query<{ tarea_id: string; titulo: string }>(
+      `SELECT tarea_id, titulo
+      FROM tablero.Tareas
+      WHERE proyecto_id = @proyecto_id`,
+      { proyecto_id: args.proyectoId },
+    );
+    if (!tareas.length) return;
+
+    const rama = await this.db.queryOne<{ rama_id: string }>(
+      `SELECT TOP 1 rama_id
+      FROM github.Ramas
+      WHERE repositorio_id = @repositorio_id
+        AND nombre = @rama_origen`,
+      { repositorio_id: args.repositorioId, rama_origen: args.ramaOrigen },
+    );
+
+    const candidatos = this.extraerCandidatosTarea(args.textoBusqueda);
+    if (candidatos.idsCortos.size === 0 && candidatos.idsCompletos.size === 0) {
+      return;
+    }
+    const actorId =
+      args.actorId ??
+      (
+        await this.db.queryOne<{ usuario_id: string }>(
+          `SELECT TOP 1 usuario_id
+          FROM nucleo.MiembrosProyecto
+          WHERE proyecto_id = @proyecto_id
+          ORDER BY CASE WHEN rol = 'propietario' THEN 0 ELSE 1 END, unido_en ASC`,
+          { proyecto_id: args.proyectoId },
+        )
+      )?.usuario_id;
+    if (!actorId) return;
+
+    for (const tarea of tareas) {
+      const id = tarea.tarea_id.toLowerCase();
+      const idCorto = id.slice(0, 8);
+      const matchDeterministico =
+        candidatos.idsCompletos.has(id) || candidatos.idsCortos.has(idCorto);
+      if (!matchDeterministico) continue;
+
+      const existe = await this.db.queryOne<{ existe: number }>(
+        `SELECT TOP 1 1 AS existe
+        FROM github.VinculosTareaGithub
+        WHERE tarea_id = @tarea_id
+          AND solicitud_id = @solicitud_id`,
+        { tarea_id: tarea.tarea_id, solicitud_id: args.solicitudId },
+      );
+      if (existe) continue;
+
+      await this.db.query(
+        `INSERT INTO github.VinculosTareaGithub (tarea_id, rama_id, solicitud_id, vinculado_por)
+        VALUES (@tarea_id, @rama_id, @solicitud_id, @vinculado_por)`,
+        {
+          tarea_id: tarea.tarea_id,
+          rama_id: rama?.rama_id ?? null,
+          solicitud_id: args.solicitudId,
+          vinculado_por: actorId,
+        },
+      );
+    }
   }
 
   /**
@@ -317,20 +454,11 @@ export class GithubService {
     await this.validarAccesoProyecto(repo.proyecto_id, usuarioId);
     const fullName = repo.nombre_completo_github;
     const encoded = encodeURI(fullName);
-    const headers: Record<string, string> = {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${tokenGithub}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-    };
-
-    const ramasRes = await fetch(`https://api.github.com/repos/${encoded}/branches?per_page=100`, { headers });
-    if (ramasRes.status === 401) {
-      throw new BadRequestException('Tu sesión de GitHub expiró. Desconecta y conecta de nuevo.');
-    }
-    if (!ramasRes.ok) {
-      throw new BadRequestException(`No se pudieron leer ramas de GitHub (${ramasRes.status})`);
-    }
-    const ramas = (await ramasRes.json()) as Array<{ name?: string; commit?: { sha?: string } }>;
+    const ramas = await this.fetchGithubPaginado<{ name?: string; commit?: { sha?: string } }>(
+      `https://api.github.com/repos/${encoded}/branches?per_page=100`,
+      tokenGithub,
+      20,
+    );
     for (const rama of ramas) {
       if (!rama.name) continue;
       await this.db.query(
@@ -354,11 +482,7 @@ export class GithubService {
       );
     }
 
-    const prsRes = await fetch(`https://api.github.com/repos/${encoded}/pulls?state=all&per_page=100`, { headers });
-    if (!prsRes.ok) {
-      throw new BadRequestException(`No se pudieron leer pull requests de GitHub (${prsRes.status})`);
-    }
-    const prs = (await prsRes.json()) as Array<{
+    const prs = await this.fetchGithubPaginado<{
       number?: number;
       title?: string;
       state?: string;
@@ -371,7 +495,7 @@ export class GithubService {
       draft?: boolean;
       created_at?: string;
       closed_at?: string | null;
-    }>;
+    }>(`https://api.github.com/repos/${encoded}/pulls?state=all&per_page=100`, tokenGithub, 20);
     for (const pr of prs) {
       if (!pr.number) continue;
       const estado = pr.merged_at ? 'integrada' : pr.state === 'open' ? 'abierta' : 'cerrada';
@@ -394,6 +518,24 @@ export class GithubService {
         integrada_en: pr.merged_at ?? null,
         cerrada_en: pr.closed_at ?? null,
       });
+
+      const solicitud = await this.db.queryOne<{ solicitud_id: string }>(
+        `SELECT TOP 1 solicitud_id
+        FROM github.SolicitudesIntegracion
+        WHERE repositorio_id = @repositorio_id
+          AND numero_github = @numero_github`,
+        { repositorio_id: repo.repositorio_id, numero_github: pr.number },
+      );
+      if (solicitud?.solicitud_id) {
+        await this.autoVincularTareasPorPullRequest({
+          repositorioId: repo.repositorio_id,
+          proyectoId: repo.proyecto_id,
+          solicitudId: solicitud.solicitud_id,
+          ramaOrigen: pr.head?.ref ?? '',
+          textoBusqueda: `${pr.title ?? ''} ${pr.body ?? ''} ${pr.head?.ref ?? ''}`,
+          actorId: usuarioId,
+        });
+      }
     }
 
     return { ramas: ramas.length, prs: prs.length };
@@ -619,6 +761,95 @@ export class GithubService {
     );
   }
 
+  async obtenerEstadoDespliegue(
+    repositorioId: string,
+    usuarioId: string,
+  ): Promise<EstadoDespliegueRepositorio> {
+    const repo = await this.db.queryOne<{ proyecto_id: string }>(
+      `SELECT TOP 1 proyecto_id
+      FROM github.Repositorios
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repositorioId },
+    );
+    if (!repo) {
+      throw new NotFoundException('Repositorio no encontrado');
+    }
+    await this.validarAccesoProyecto(repo.proyecto_id, usuarioId);
+
+    const ramas = await this.db.query<{ nombre: string; sha_cabeza: string; ultimo_push_en: string | null }>(
+      `SELECT nombre, sha_cabeza, ultimo_push_en
+      FROM github.Ramas
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repositorioId },
+    );
+
+    const pick = (...nombres: string[]) => {
+      const match = ramas.find((r) => nombres.some((n) => r.nombre.toLowerCase() === n.toLowerCase()));
+      return {
+        nombre: match?.nombre ?? nombres[0],
+        sha: match?.sha_cabeza ?? null,
+        ultimo_push_en: match?.ultimo_push_en ?? null,
+      };
+    };
+
+    const conteos = await this.db.queryOne<{
+      a_desarrollo: number;
+      a_main_prueba: number;
+      a_main: number;
+    }>(
+      `SELECT
+        SUM(CASE WHEN LOWER(rama_destino) = 'desarrollo' AND estado = 'abierta' THEN 1 ELSE 0 END) AS a_desarrollo,
+        SUM(CASE WHEN LOWER(rama_destino) IN ('main-prueba', 'main prueba', 'main_prueba') AND estado = 'abierta' THEN 1 ELSE 0 END) AS a_main_prueba,
+        SUM(CASE WHEN LOWER(rama_destino) = 'main' AND estado = 'abierta' THEN 1 ELSE 0 END) AS a_main
+      FROM github.SolicitudesIntegracion
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repositorioId },
+    );
+
+    return {
+      rama_desarrollo: pick('desarrollo', 'development', 'dev'),
+      rama_main_prueba: pick('main-prueba', 'main prueba', 'main_prueba'),
+      rama_main: pick('main', 'master'),
+      prs_abiertas: {
+        a_desarrollo: conteos?.a_desarrollo ?? 0,
+        a_main_prueba: conteos?.a_main_prueba ?? 0,
+        a_main: conteos?.a_main ?? 0,
+      },
+    };
+  }
+
+  async obtenerVinculosTareas(
+    repositorioId: string,
+    usuarioId: string,
+  ): Promise<Array<{ tarea_id: string; titulo: string; solicitud_numero: number | null; rama: string | null }>> {
+    const repo = await this.db.queryOne<{ proyecto_id: string }>(
+      `SELECT TOP 1 proyecto_id
+      FROM github.Repositorios
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repositorioId },
+    );
+    if (!repo) throw new NotFoundException('Repositorio no encontrado');
+    await this.validarAccesoProyecto(repo.proyecto_id, usuarioId);
+
+    return this.db.query(
+      `SELECT
+        t.tarea_id,
+        t.titulo,
+        si.numero_github AS solicitud_numero,
+        r.nombre AS rama
+      FROM github.VinculosTareaGithub v
+      INNER JOIN tablero.Tareas t ON t.tarea_id = v.tarea_id
+      LEFT JOIN github.SolicitudesIntegracion si ON si.solicitud_id = v.solicitud_id
+      LEFT JOIN github.Ramas r ON r.rama_id = v.rama_id
+      WHERE (
+          si.repositorio_id = @repositorio_id
+          OR r.repositorio_id = @repositorio_id
+      )
+      ORDER BY t.actualizado_en DESC`,
+      { repositorio_id: repositorioId },
+    );
+  }
+
   async procesarEvento(evento: string, payload: unknown): Promise<{ procesado: boolean; detalle: string }> {
     if (evento === 'push') {
       return this.procesarPush(payload as PushPayload);
@@ -757,6 +988,24 @@ export class GithubService {
       integrada_en: pr.merged_at ?? null,
       cerrada_en: pr.closed_at ?? null,
     });
+
+    const solicitud = await this.db.queryOne<{ solicitud_id: string; proyecto_id: string }>(
+      `SELECT TOP 1 si.solicitud_id, r.proyecto_id
+      FROM github.SolicitudesIntegracion si
+      INNER JOIN github.Repositorios r ON r.repositorio_id = si.repositorio_id
+      WHERE si.repositorio_id = @repositorio_id
+        AND si.numero_github = @numero_github`,
+      { repositorio_id: repo.repositorio_id, numero_github: pr.number },
+    );
+    if (solicitud?.solicitud_id) {
+      await this.autoVincularTareasPorPullRequest({
+        repositorioId: repo.repositorio_id,
+        proyectoId: solicitud.proyecto_id,
+        solicitudId: solicitud.solicitud_id,
+        ramaOrigen: pr.head?.ref ?? '',
+        textoBusqueda: `${pr.title ?? ''} ${pr.body ?? ''} ${pr.head?.ref ?? ''}`,
+      });
+    }
 
     return { procesado: true, detalle: `PR #${pr.number} procesado` };
   }
