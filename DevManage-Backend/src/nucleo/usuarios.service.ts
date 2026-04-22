@@ -12,6 +12,12 @@ export interface UsuarioPerfil {
   actualizado_en: string;
 }
 
+export interface UsuarioBasico {
+  usuario_id: string;
+  correo: string;
+  nombre_visible: string;
+}
+
 @Injectable()
 export class UsuariosService {
   constructor(private readonly db: DatabaseService) {}
@@ -37,5 +43,17 @@ export class UsuariosService {
     }
 
     return usuario;
+  }
+
+  obtenerUsuariosActivos(): Promise<UsuarioBasico[]> {
+    return this.db.query<UsuarioBasico>(
+      `SELECT
+        usuario_id,
+        correo,
+        nombre_visible
+      FROM nucleo.Usuarios
+      WHERE esta_activo = 1
+      ORDER BY nombre_visible ASC, correo ASC`,
+    );
   }
 }

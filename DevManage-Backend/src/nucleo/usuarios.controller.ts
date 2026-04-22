@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UsuarioActual } from '../auth/decorators/usuario-actual.decorator';
 import { JwtGuard } from '../auth/guards/jwt.guard';
 import { UsuariosService } from './usuarios.service';
-import type { UsuarioPerfil } from './usuarios.service';
+import type { UsuarioBasico, UsuarioPerfil } from './usuarios.service';
 
 @ApiTags('nucleo')
 @ApiBearerAuth()
@@ -16,5 +16,11 @@ export class UsuariosController {
   @Get('yo')
   obtenerPerfilActual(@UsuarioActual('sub') usuarioId: string): Promise<UsuarioPerfil> {
     return this.usuariosService.obtenerPerfil(usuarioId);
+  }
+
+  @ApiOperation({ summary: 'Listar usuarios activos para selección' })
+  @Get()
+  obtenerUsuariosActivos(): Promise<UsuarioBasico[]> {
+    return this.usuariosService.obtenerUsuariosActivos();
   }
 }
