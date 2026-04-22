@@ -112,7 +112,10 @@ export class ProyectosService {
       `SELECT TOP 1 me.equipo_id
       FROM nucleo.MiembrosEquipo me
       WHERE me.usuario_id = @usuario_id
-      ORDER BY me.unido_en ASC`,
+        AND me.rol IN ('propietario', 'administrador')
+      ORDER BY
+        CASE me.rol WHEN 'propietario' THEN 0 WHEN 'administrador' THEN 1 ELSE 2 END,
+        me.unido_en ASC`,
       { usuario_id: usuarioId },
     );
 
