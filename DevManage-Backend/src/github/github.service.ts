@@ -1236,6 +1236,7 @@ export class GithubService {
       FROM github.VinculosTareaGithub v
       INNER JOIN github.Ramas r ON r.rama_id = v.rama_id
       WHERE v.tarea_id = @tarea_id
+        AND v.solicitud_id IS NULL
         AND r.repositorio_id = @repositorio_id
       GROUP BY r.nombre
 
@@ -1254,21 +1255,9 @@ export class GithubService {
       INNER JOIN github.Ramas r ON r.rama_id = v.rama_id
       INNER JOIN github.Confirmaciones c ON c.rama_id = r.rama_id
       WHERE v.tarea_id = @tarea_id
+        AND v.solicitud_id IS NULL
         AND r.repositorio_id = @repositorio_id
-        AND (
-          LOWER(c.mensaje) LIKE '%' + LOWER(@tarea_id) + '%'
-          OR LOWER(c.mensaje) LIKE '%dm-' + LOWER(LEFT(@tarea_id, 8)) + '%'
-          OR EXISTS (
-            SELECT 1
-            FROM github.VinculosTareaGithub vpr
-            INNER JOIN github.SolicitudesIntegracion si ON si.solicitud_id = vpr.solicitud_id
-            WHERE vpr.tarea_id = @tarea_id
-              AND si.repositorio_id = @repositorio_id
-              AND si.rama_origen = r.nombre
-              AND c.confirmado_en >= DATEADD(DAY, -1, si.abierta_en)
-              AND c.confirmado_en <= COALESCE(si.integrada_en, si.cerrada_en, SYSUTCDATETIME())
-          )
-        )
+        AND c.confirmado_en >= DATEADD(DAY, -1, v.vinculado_en)
 
       UNION ALL
 
