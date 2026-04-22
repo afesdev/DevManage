@@ -42,6 +42,7 @@ export class AuthService {
   ) {}
 
   async login(dto: LoginDto): Promise<{ access_token: string }> {
+    const correoNormalizado = dto.correo.trim().toLowerCase();
     const usuario = await this.db.queryOne<UsuarioLoginRow>(
       `SELECT TOP 1
         usuario_id,
@@ -51,7 +52,7 @@ export class AuthService {
         esta_activo
       FROM nucleo.Usuarios
       WHERE correo = @correo`,
-      { correo: dto.correo },
+      { correo: correoNormalizado },
     );
 
     if (!usuario || !usuario.hash_contrasena || !usuario.esta_activo) {
@@ -75,6 +76,8 @@ export class AuthService {
   }
 
   async registrar(dto: RegistroDto): Promise<{ access_token: string }> {
+    const correoNormalizado = dto.correo.trim().toLowerCase();
+    const nombreVisibleNormalizado = dto.nombre_visible.trim();
     const hashContrasena = await hash(dto.contrasena, 12);
 
     try {
@@ -94,8 +97,8 @@ export class AuthService {
           @hash_contrasena
         )`,
         {
-          correo: dto.correo,
-          nombre_visible: dto.nombre_visible,
+          correo: correoNormalizado,
+          nombre_visible: nombreVisibleNormalizado,
           hash_contrasena: hashContrasena,
         },
       );
@@ -115,8 +118,17 @@ export class AuthService {
       };
     } catch (error: unknown) {
       const codigo = (error as { number?: number })?.number;
+      const mensajeError = String((error as { message?: string })?.message ?? '').toLowerCase();
       if (codigo === 2627 || codigo === 2601) {
-        throw new ConflictException('El correo ya está registrado');
+        if (mensajeError.includes('uq_usuarios_correo')) {
+          throw new ConflictException('El correo ya está registrado');
+        }
+        if (mensajeError.includes('uq_usuarios_github')) {
+          throw new ConflictException(
+            'No se pudo registrar por una restricción de GitHub en base de datos. Contacta al administrador.',
+          );
+        }
+        throw new ConflictException('No se pudo registrar por restricción única en base de datos');
       }
       throw error;
     }
