@@ -1224,7 +1224,19 @@ export class GithubService {
       estado_pr: string | null;
       rama_destino: string | null;
     }>(
-      `SELECT
+      `WITH VinculosRamaRecientes AS (
+        SELECT
+          v.tarea_id,
+          v.rama_id,
+          MAX(v.vinculado_en) AS vinculado_en
+        FROM github.VinculosTareaGithub v
+        INNER JOIN github.Ramas r ON r.rama_id = v.rama_id
+        WHERE v.tarea_id = @tarea_id
+          AND v.solicitud_id IS NULL
+          AND r.repositorio_id = @repositorio_id
+        GROUP BY v.tarea_id, v.rama_id
+      )
+      SELECT
         'rama_creada' AS tipo,
         MIN(r.ultimo_push_en) AS ocurrido_en,
         r.nombre AS rama,
@@ -1233,10 +1245,9 @@ export class GithubService {
         CONCAT('Rama detectada: ', r.nombre) AS titulo,
         NULL AS estado_pr,
         NULL AS rama_destino
-      FROM github.VinculosTareaGithub v
-      INNER JOIN github.Ramas r ON r.rama_id = v.rama_id
-      WHERE v.tarea_id = @tarea_id
-        AND v.solicitud_id IS NULL
+      FROM VinculosRamaRecientes vr
+      INNER JOIN github.Ramas r ON r.rama_id = vr.rama_id
+      WHERE vr.tarea_id = @tarea_id
         AND r.repositorio_id = @repositorio_id
       GROUP BY r.nombre
 
@@ -1251,13 +1262,13 @@ export class GithubService {
         c.mensaje AS titulo,
         NULL AS estado_pr,
         NULL AS rama_destino
-      FROM github.VinculosTareaGithub v
-      INNER JOIN github.Ramas r ON r.rama_id = v.rama_id
+      FROM VinculosRamaRecientes vr
+      INNER JOIN github.Ramas r ON r.rama_id = vr.rama_id
       INNER JOIN github.Confirmaciones c ON c.rama_id = r.rama_id
-      WHERE v.tarea_id = @tarea_id
-        AND v.solicitud_id IS NULL
+      WHERE vr.tarea_id = @tarea_id
         AND r.repositorio_id = @repositorio_id
-        AND c.confirmado_en >= DATEADD(DAY, -1, v.vinculado_en)
+        AND c.confirmado_en >= DATEADD(DAY, -1, vr.vinculado_en)
+        AND LOWER(c.mensaje) NOT LIKE 'merge pull request %'
 
       UNION ALL
 
