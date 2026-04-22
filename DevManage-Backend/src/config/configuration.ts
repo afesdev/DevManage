@@ -9,6 +9,7 @@ function parseCorsOrigins(raw: string | undefined): string[] {
   return raw
     .split(',')
     .map((s) => s.trim())
+    .map((s) => s.replace(/\/+$/, ''))
     .filter(Boolean);
 }
 
