@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
+import { ActualizarEtiquetaDto } from './dto/actualizar-etiqueta.dto';
 import { ActualizarTareaDto } from './dto/actualizar-tarea.dto';
 import { CrearEpicaDto } from './dto/crear-epica.dto';
 import { CrearEtiquetaDto } from './dto/crear-etiqueta.dto';
@@ -74,9 +75,57 @@ export interface TareaEtiquetaResumen {
   etiqueta_id: string;
 }
 
+export interface ComentarioTareaResumen {
+  comentario_id: string;
+  tarea_id: string;
+  autor_id: string;
+  autor_nombre: string;
+  contenido: string;
+  creado_en: string;
+  editado_en: string | null;
+}
+
+export interface TareaActividadResumen {
+  actividad_id: string;
+  tarea_id: string;
+  actor_id: string;
+  actor_nombre: string;
+  tipo_accion: string;
+  valor_anterior: string | null;
+  valor_nuevo: string | null;
+  ocurrido_en: string;
+}
+
 @Injectable()
 export class TableroService {
   constructor(private readonly db: DatabaseService) {}
+
+  private recortarActividad(valor: string | null | undefined): string | null {
+    if (valor === undefined || valor === null) return null;
+    const limpio = valor.trim();
+    if (!limpio) return null;
+    return limpio.slice(0, 500);
+  }
+
+  private async registrarActividad(args: {
+    tareaId: string;
+    actorId: string;
+    tipoAccion: string;
+    valorAnterior?: string | null;
+    valorNuevo?: string | null;
+  }): Promise<void> {
+    await this.db.query(
+      `INSERT INTO tablero.Actividad (tarea_id, actor_id, tipo_accion, valor_anterior, valor_nuevo)
+      VALUES (@tarea_id, @actor_id, @tipo_accion, @valor_anterior, @valor_nuevo)`,
+      {
+        tarea_id: args.tareaId,
+        actor_id: args.actorId,
+        tipo_accion: args.tipoAccion,
+        valor_anterior: this.recortarActividad(args.valorAnterior),
+        valor_nuevo: this.recortarActividad(args.valorNuevo),
+      },
+    );
+  }
 
   private async actualizarPosicionesColumna(columnaId: string, tareasIds: string[]): Promise<void> {
     if (!tareasIds.length) {
@@ -372,6 +421,74 @@ export class TableroService {
     );
   }
 
+  async actualizarEtiqueta(
+    proyectoId: string,
+    etiquetaId: string,
+    dto: ActualizarEtiquetaDto,
+    usuarioId: string,
+  ): Promise<EtiquetaResumen> {
+    await this.validarAccesoProyecto(proyectoId, usuarioId);
+    const actual = await this.db.queryOne<EtiquetaResumen>(
+      `SELECT TOP 1 etiqueta_id, proyecto_id, nombre, color
+      FROM tablero.Etiquetas
+      WHERE etiqueta_id = @etiqueta_id
+        AND proyecto_id = @proyecto_id`,
+      { etiqueta_id: etiquetaId, proyecto_id: proyectoId },
+    );
+    if (!actual) throw new NotFoundException('Etiqueta no encontrada');
+
+    const nombre = dto.nombre !== undefined ? dto.nombre.trim() : actual.nombre;
+    const color = dto.color ?? actual.color;
+    if (!nombre) throw new BadRequestException('El nombre de la etiqueta es obligatorio');
+
+    const actualizada = await this.db.queryOne<EtiquetaResumen>(
+      `UPDATE tablero.Etiquetas
+      SET nombre = @nombre,
+          color = @color
+      OUTPUT INSERTED.etiqueta_id, INSERTED.proyecto_id, INSERTED.nombre, INSERTED.color
+      WHERE etiqueta_id = @etiqueta_id
+        AND proyecto_id = @proyecto_id`,
+      {
+        etiqueta_id: etiquetaId,
+        proyecto_id: proyectoId,
+        nombre,
+        color,
+      },
+    );
+    if (!actualizada) throw new NotFoundException('No se pudo actualizar la etiqueta');
+    return actualizada;
+  }
+
+  async eliminarEtiqueta(
+    proyectoId: string,
+    etiquetaId: string,
+    usuarioId: string,
+  ): Promise<{ mensaje: string }> {
+    await this.validarAccesoProyecto(proyectoId, usuarioId);
+
+    const etiqueta = await this.db.queryOne<{ etiqueta_id: string }>(
+      `SELECT TOP 1 etiqueta_id
+      FROM tablero.Etiquetas
+      WHERE etiqueta_id = @etiqueta_id
+        AND proyecto_id = @proyecto_id`,
+      { etiqueta_id: etiquetaId, proyecto_id: proyectoId },
+    );
+    if (!etiqueta) throw new NotFoundException('Etiqueta no encontrada');
+
+    await this.db.query(
+      `DELETE FROM tablero.TareasEtiquetas
+      WHERE etiqueta_id = @etiqueta_id`,
+      { etiqueta_id: etiquetaId },
+    );
+    await this.db.query(
+      `DELETE FROM tablero.Etiquetas
+      WHERE etiqueta_id = @etiqueta_id
+        AND proyecto_id = @proyecto_id`,
+      { etiqueta_id: etiquetaId, proyecto_id: proyectoId },
+    );
+    return { mensaje: 'Etiqueta eliminada correctamente' };
+  }
+
   async crearTarea(dto: CrearTareaDto, usuarioId: string): Promise<TareaTablero> {
     await this.validarAccesoProyecto(dto.proyecto_id, usuarioId);
 
@@ -465,6 +582,13 @@ export class TableroService {
       throw new NotFoundException('No se pudo crear la tarea');
     }
 
+    await this.registrarActividad({
+      tareaId: tareaCreada.tarea_id,
+      actorId: usuarioId,
+      tipoAccion: 'tarea_creada',
+      valorNuevo: tareaCreada.titulo,
+    });
+
     return tareaCreada;
   }
 
@@ -557,6 +681,14 @@ export class TableroService {
     destinoReordenado.splice(indiceNormalizado, 0, tareaId);
 
     if (!esMismaColumna) {
+      const colOrigen = await this.db.queryOne<{ nombre: string }>(
+        `SELECT TOP 1 nombre FROM tablero.Columnas WHERE columna_id = @columna_id`,
+        { columna_id: tarea.columna_id },
+      );
+      const colDestino = await this.db.queryOne<{ nombre: string }>(
+        `SELECT TOP 1 nombre FROM tablero.Columnas WHERE columna_id = @columna_id`,
+        { columna_id: columnaDestinoId },
+      );
       await this.db.query(
         `UPDATE tablero.Tareas
         SET columna_id = @columna_id,
@@ -570,6 +702,13 @@ export class TableroService {
         { tarea_id: tareaId, columna_id: columnaDestinoId },
       );
       await this.actualizarPosicionesColumna(tarea.columna_id, origenSinTarea);
+      await this.registrarActividad({
+        tareaId,
+        actorId: usuarioId,
+        tipoAccion: 'columna_cambiada',
+        valorAnterior: colOrigen?.nombre ?? null,
+        valorNuevo: colDestino?.nombre ?? null,
+      });
     }
 
     await this.actualizarPosicionesColumna(columnaDestinoId, destinoReordenado);
@@ -729,6 +868,43 @@ export class TableroService {
       throw new NotFoundException('No se pudo actualizar la tarea');
     }
 
+    if (curr.titulo !== actualizada.titulo) {
+      await this.registrarActividad({
+        tareaId,
+        actorId: usuarioId,
+        tipoAccion: 'titulo_cambiado',
+        valorAnterior: curr.titulo,
+        valorNuevo: actualizada.titulo,
+      });
+    }
+    if ((curr.descripcion ?? '') !== (actualizada.descripcion ?? '')) {
+      await this.registrarActividad({
+        tareaId,
+        actorId: usuarioId,
+        tipoAccion: 'descripcion_cambiada',
+        valorAnterior: curr.descripcion,
+        valorNuevo: actualizada.descripcion,
+      });
+    }
+    if (curr.prioridad !== actualizada.prioridad) {
+      await this.registrarActividad({
+        tareaId,
+        actorId: usuarioId,
+        tipoAccion: 'prioridad_cambiada',
+        valorAnterior: curr.prioridad,
+        valorNuevo: actualizada.prioridad,
+      });
+    }
+    if ((curr.responsable_id ?? '') !== (actualizada.responsable_id ?? '')) {
+      await this.registrarActividad({
+        tareaId,
+        actorId: usuarioId,
+        tipoAccion: 'responsable_cambiado',
+        valorAnterior: curr.responsable_id,
+        valorNuevo: actualizada.responsable_id,
+      });
+    }
+
     return actualizada;
   }
 
@@ -763,6 +939,13 @@ export class TableroService {
         { columna_id: tarea.columna_id, tarea_id: tareaId },
       )
     ).map((row) => row.tarea_id);
+
+    await this.registrarActividad({
+      tareaId,
+      actorId: usuarioId,
+      tipoAccion: 'tarea_eliminada',
+      valorAnterior: tareaId,
+    });
 
     const eliminada = await this.db.queryOne<{ tarea_id: string }>(
       `DELETE FROM tablero.Tareas
@@ -817,6 +1000,17 @@ export class TableroService {
       { tarea_id: tareaId, etiqueta_id: etiquetaId },
     );
 
+    const etiquetaNombre = await this.db.queryOne<{ nombre: string }>(
+      `SELECT TOP 1 nombre FROM tablero.Etiquetas WHERE etiqueta_id = @etiqueta_id`,
+      { etiqueta_id: etiquetaId },
+    );
+    await this.registrarActividad({
+      tareaId,
+      actorId: usuarioId,
+      tipoAccion: 'etiqueta_agregada',
+      valorNuevo: etiquetaNombre?.nombre ?? etiquetaId,
+    });
+
     return { mensaje: 'Etiqueta asignada correctamente' };
   }
 
@@ -832,13 +1026,232 @@ export class TableroService {
     if (!tarea) throw new NotFoundException('Tarea no encontrada');
     await this.validarAccesoProyecto(tarea.proyecto_id, usuarioId);
 
+    const etiquetaNombre = await this.db.queryOne<{ nombre: string }>(
+      `SELECT TOP 1 nombre FROM tablero.Etiquetas WHERE etiqueta_id = @etiqueta_id`,
+      { etiqueta_id: etiquetaId },
+    );
     await this.db.query(
       `DELETE FROM tablero.TareasEtiquetas
       WHERE tarea_id = @tarea_id
         AND etiqueta_id = @etiqueta_id`,
       { tarea_id: tareaId, etiqueta_id: etiquetaId },
     );
+    await this.registrarActividad({
+      tareaId,
+      actorId: usuarioId,
+      tipoAccion: 'etiqueta_removida',
+      valorAnterior: etiquetaNombre?.nombre ?? etiquetaId,
+    });
 
     return { mensaje: 'Etiqueta removida correctamente' };
+  }
+
+  async obtenerComentariosPorTarea(
+    tareaId: string,
+    usuarioId: string,
+  ): Promise<ComentarioTareaResumen[]> {
+    const tarea = await this.db.queryOne<{ proyecto_id: string }>(
+      `SELECT TOP 1 proyecto_id FROM tablero.Tareas WHERE tarea_id = @tarea_id`,
+      { tarea_id: tareaId },
+    );
+    if (!tarea) throw new NotFoundException('Tarea no encontrada');
+    await this.validarAccesoProyecto(tarea.proyecto_id, usuarioId);
+
+    return this.db.query<ComentarioTareaResumen>(
+      `SELECT
+        c.comentario_id,
+        c.tarea_id,
+        c.autor_id,
+        COALESCE(u.nombre_visible, u.correo) AS autor_nombre,
+        c.contenido,
+        c.creado_en,
+        c.editado_en
+      FROM tablero.Comentarios c
+      INNER JOIN nucleo.Usuarios u ON u.usuario_id = c.autor_id
+      WHERE c.tarea_id = @tarea_id
+      ORDER BY c.creado_en DESC`,
+      { tarea_id: tareaId },
+    );
+  }
+
+  async crearComentarioEnTarea(
+    tareaId: string,
+    contenidoRaw: string,
+    usuarioId: string,
+  ): Promise<ComentarioTareaResumen> {
+    const tarea = await this.db.queryOne<{ proyecto_id: string }>(
+      `SELECT TOP 1 proyecto_id FROM tablero.Tareas WHERE tarea_id = @tarea_id`,
+      { tarea_id: tareaId },
+    );
+    if (!tarea) throw new NotFoundException('Tarea no encontrada');
+    await this.validarAccesoProyecto(tarea.proyecto_id, usuarioId);
+
+    const contenido = contenidoRaw.trim();
+    if (!contenido) throw new BadRequestException('El comentario no puede estar vacio');
+
+    const comentario = await this.db.queryOne<ComentarioTareaResumen>(
+      `INSERT INTO tablero.Comentarios (tarea_id, autor_id, contenido)
+      OUTPUT
+        INSERTED.comentario_id,
+        INSERTED.tarea_id,
+        INSERTED.autor_id,
+        CAST('' AS NVARCHAR(200)) AS autor_nombre,
+        INSERTED.contenido,
+        INSERTED.creado_en,
+        INSERTED.editado_en
+      VALUES (@tarea_id, @autor_id, @contenido)`,
+      { tarea_id: tareaId, autor_id: usuarioId, contenido },
+    );
+    if (!comentario) throw new NotFoundException('No se pudo crear el comentario');
+
+    await this.registrarActividad({
+      tareaId,
+      actorId: usuarioId,
+      tipoAccion: 'comentario_agregado',
+      valorNuevo: contenido,
+    });
+
+    const autor = await this.db.queryOne<{ autor_nombre: string }>(
+      `SELECT COALESCE(nombre_visible, correo) AS autor_nombre
+      FROM nucleo.Usuarios
+      WHERE usuario_id = @usuario_id`,
+      { usuario_id: usuarioId },
+    );
+    return { ...comentario, autor_nombre: autor?.autor_nombre ?? 'Usuario' };
+  }
+
+  async actualizarComentarioDeTarea(
+    tareaId: string,
+    comentarioId: string,
+    contenidoRaw: string,
+    usuarioId: string,
+  ): Promise<ComentarioTareaResumen> {
+    const comentarioActual = await this.db.queryOne<{
+      tarea_id: string;
+      autor_id: string;
+      proyecto_id: string;
+      contenido: string;
+    }>(
+      `SELECT TOP 1 c.tarea_id, c.autor_id, t.proyecto_id, c.contenido
+      FROM tablero.Comentarios c
+      INNER JOIN tablero.Tareas t ON t.tarea_id = c.tarea_id
+      WHERE c.comentario_id = @comentario_id`,
+      { comentario_id: comentarioId },
+    );
+    if (!comentarioActual || comentarioActual.tarea_id !== tareaId) {
+      throw new NotFoundException('Comentario no encontrado');
+    }
+    await this.validarAccesoProyecto(comentarioActual.proyecto_id, usuarioId);
+    if (comentarioActual.autor_id !== usuarioId) {
+      throw new ForbiddenException('Solo el autor puede editar su comentario');
+    }
+
+    const contenido = contenidoRaw.trim();
+    if (!contenido) throw new BadRequestException('El comentario no puede estar vacio');
+
+    const actualizado = await this.db.queryOne<ComentarioTareaResumen>(
+      `UPDATE tablero.Comentarios
+      SET contenido = @contenido,
+          editado_en = SYSUTCDATETIME()
+      OUTPUT
+        INSERTED.comentario_id,
+        INSERTED.tarea_id,
+        INSERTED.autor_id,
+        CAST('' AS NVARCHAR(200)) AS autor_nombre,
+        INSERTED.contenido,
+        INSERTED.creado_en,
+        INSERTED.editado_en
+      WHERE comentario_id = @comentario_id
+        AND tarea_id = @tarea_id`,
+      { comentario_id: comentarioId, tarea_id: tareaId, contenido },
+    );
+    if (!actualizado) throw new NotFoundException('No se pudo actualizar el comentario');
+
+    await this.registrarActividad({
+      tareaId,
+      actorId: usuarioId,
+      tipoAccion: 'comentario_editado',
+      valorAnterior: comentarioActual.contenido,
+      valorNuevo: contenido,
+    });
+
+    const autor = await this.db.queryOne<{ autor_nombre: string }>(
+      `SELECT COALESCE(nombre_visible, correo) AS autor_nombre
+      FROM nucleo.Usuarios
+      WHERE usuario_id = @usuario_id`,
+      { usuario_id: usuarioId },
+    );
+    return { ...actualizado, autor_nombre: autor?.autor_nombre ?? 'Usuario' };
+  }
+
+  async eliminarComentarioDeTarea(
+    tareaId: string,
+    comentarioId: string,
+    usuarioId: string,
+  ): Promise<{ mensaje: string }> {
+    const comentarioActual = await this.db.queryOne<{
+      tarea_id: string;
+      autor_id: string;
+      proyecto_id: string;
+      contenido: string;
+    }>(
+      `SELECT TOP 1 c.tarea_id, c.autor_id, t.proyecto_id, c.contenido
+      FROM tablero.Comentarios c
+      INNER JOIN tablero.Tareas t ON t.tarea_id = c.tarea_id
+      WHERE c.comentario_id = @comentario_id`,
+      { comentario_id: comentarioId },
+    );
+    if (!comentarioActual || comentarioActual.tarea_id !== tareaId) {
+      throw new NotFoundException('Comentario no encontrado');
+    }
+    await this.validarAccesoProyecto(comentarioActual.proyecto_id, usuarioId);
+    if (comentarioActual.autor_id !== usuarioId) {
+      throw new ForbiddenException('Solo el autor puede eliminar su comentario');
+    }
+
+    await this.db.query(
+      `DELETE FROM tablero.Comentarios
+      WHERE comentario_id = @comentario_id
+        AND tarea_id = @tarea_id`,
+      { comentario_id: comentarioId, tarea_id: tareaId },
+    );
+
+    await this.registrarActividad({
+      tareaId,
+      actorId: usuarioId,
+      tipoAccion: 'comentario_eliminado',
+      valorAnterior: comentarioActual.contenido,
+    });
+
+    return { mensaje: 'Comentario eliminado correctamente' };
+  }
+
+  async obtenerActividadPorTarea(
+    tareaId: string,
+    usuarioId: string,
+  ): Promise<TareaActividadResumen[]> {
+    const tarea = await this.db.queryOne<{ proyecto_id: string }>(
+      `SELECT TOP 1 proyecto_id FROM tablero.Tareas WHERE tarea_id = @tarea_id`,
+      { tarea_id: tareaId },
+    );
+    if (!tarea) throw new NotFoundException('Tarea no encontrada');
+    await this.validarAccesoProyecto(tarea.proyecto_id, usuarioId);
+
+    return this.db.query<TareaActividadResumen>(
+      `SELECT
+        a.actividad_id,
+        a.tarea_id,
+        a.actor_id,
+        COALESCE(u.nombre_visible, u.correo) AS actor_nombre,
+        a.tipo_accion,
+        a.valor_anterior,
+        a.valor_nuevo,
+        a.ocurrido_en
+      FROM tablero.Actividad a
+      INNER JOIN nucleo.Usuarios u ON u.usuario_id = a.actor_id
+      WHERE a.tarea_id = @tarea_id
+      ORDER BY a.ocurrido_en DESC`,
+      { tarea_id: tareaId },
+    );
   }
 }

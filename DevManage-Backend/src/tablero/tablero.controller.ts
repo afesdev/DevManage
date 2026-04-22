@@ -2,7 +2,10 @@ import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from '@n
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UsuarioActual } from '../auth/decorators/usuario-actual.decorator';
 import { JwtGuard } from '../auth/guards/jwt.guard';
+import { ActualizarComentarioDto } from './dto/actualizar-comentario.dto';
+import { ActualizarEtiquetaDto } from './dto/actualizar-etiqueta.dto';
 import { ActualizarTareaDto } from './dto/actualizar-tarea.dto';
+import { CrearComentarioDto } from './dto/crear-comentario.dto';
 import { CrearEpicaDto } from './dto/crear-epica.dto';
 import { CrearEtiquetaDto } from './dto/crear-etiqueta.dto';
 import { CrearTareaDto } from './dto/crear-tarea.dto';
@@ -11,10 +14,12 @@ import { ReordenarTareaDto } from './dto/reordenar-tarea.dto';
 import { VincularEtiquetaDto } from './dto/vincular-etiqueta.dto';
 import {
   ColumnaTablero,
+  ComentarioTareaResumen,
   EpicaResumen,
   EtiquetaResumen,
   MiembroProyectoResumen,
   ProyectoResumen,
+  TareaActividadResumen,
   TareaEtiquetaResumen,
   TableroService,
   TareaTablero,
@@ -107,6 +112,27 @@ export class TableroController {
     return this.tableroService.obtenerEtiquetasPorTarea(proyectoId, usuarioId);
   }
 
+  @ApiOperation({ summary: 'Actualizar etiqueta de un proyecto' })
+  @Patch('proyectos/:proyecto_id/etiquetas/:etiqueta_id')
+  actualizarEtiqueta(
+    @Param('proyecto_id') proyectoId: string,
+    @Param('etiqueta_id') etiquetaId: string,
+    @Body() dto: ActualizarEtiquetaDto,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<EtiquetaResumen> {
+    return this.tableroService.actualizarEtiqueta(proyectoId, etiquetaId, dto, usuarioId);
+  }
+
+  @ApiOperation({ summary: 'Eliminar etiqueta de un proyecto' })
+  @Delete('proyectos/:proyecto_id/etiquetas/:etiqueta_id')
+  eliminarEtiqueta(
+    @Param('proyecto_id') proyectoId: string,
+    @Param('etiqueta_id') etiquetaId: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<{ mensaje: string }> {
+    return this.tableroService.eliminarEtiqueta(proyectoId, etiquetaId, usuarioId);
+  }
+
   @ApiOperation({ summary: 'Crear una tarea en el tablero' })
   @Post('tareas')
   crearTarea(
@@ -173,5 +199,59 @@ export class TableroController {
     @UsuarioActual('sub') usuarioId: string,
   ): Promise<{ mensaje: string }> {
     return this.tableroService.quitarEtiquetaDeTarea(tareaId, etiquetaId, usuarioId);
+  }
+
+  @ApiOperation({ summary: 'Listar comentarios de una tarea' })
+  @Get('tareas/:tarea_id/comentarios')
+  obtenerComentariosPorTarea(
+    @Param('tarea_id') tareaId: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<ComentarioTareaResumen[]> {
+    return this.tableroService.obtenerComentariosPorTarea(tareaId, usuarioId);
+  }
+
+  @ApiOperation({ summary: 'Crear comentario en una tarea' })
+  @Post('tareas/:tarea_id/comentarios')
+  crearComentarioEnTarea(
+    @Param('tarea_id') tareaId: string,
+    @Body() dto: CrearComentarioDto,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<ComentarioTareaResumen> {
+    return this.tableroService.crearComentarioEnTarea(tareaId, dto.contenido, usuarioId);
+  }
+
+  @ApiOperation({ summary: 'Actualizar comentario de tarea' })
+  @Patch('tareas/:tarea_id/comentarios/:comentario_id')
+  actualizarComentarioDeTarea(
+    @Param('tarea_id') tareaId: string,
+    @Param('comentario_id') comentarioId: string,
+    @Body() dto: ActualizarComentarioDto,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<ComentarioTareaResumen> {
+    return this.tableroService.actualizarComentarioDeTarea(
+      tareaId,
+      comentarioId,
+      dto.contenido,
+      usuarioId,
+    );
+  }
+
+  @ApiOperation({ summary: 'Eliminar comentario de tarea' })
+  @Delete('tareas/:tarea_id/comentarios/:comentario_id')
+  eliminarComentarioDeTarea(
+    @Param('tarea_id') tareaId: string,
+    @Param('comentario_id') comentarioId: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<{ mensaje: string }> {
+    return this.tableroService.eliminarComentarioDeTarea(tareaId, comentarioId, usuarioId);
+  }
+
+  @ApiOperation({ summary: 'Listar actividad de una tarea' })
+  @Get('tareas/:tarea_id/actividad')
+  obtenerActividadPorTarea(
+    @Param('tarea_id') tareaId: string,
+    @UsuarioActual('sub') usuarioId: string,
+  ): Promise<TareaActividadResumen[]> {
+    return this.tableroService.obtenerActividadPorTarea(tareaId, usuarioId);
   }
 }
