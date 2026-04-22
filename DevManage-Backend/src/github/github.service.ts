@@ -706,8 +706,17 @@ export class GithubService {
       );
     }
 
-    // Backfill de commits para que la pestaña de commits tenga datos
-    // aun cuando no hayan llegado webhooks recientes.
+    // Normaliza historial local del repositorio para evitar arrastre de commits
+    // heredados entre ramas por ancestros compartidos.
+    await this.db.query(
+      `DELETE FROM github.Confirmaciones
+      WHERE repositorio_id = @repositorio_id`,
+      { repositorio_id: repo.repositorio_id },
+    );
+
+    // Backfill mínimo por rama:
+    // solo trae la punta (HEAD) para evitar contaminar la rama con
+    // histórico heredado/antecesores comunes de otras ramas.
     for (const rama of ramas.slice(0, 25)) {
       if (!rama.name) continue;
       const commitsRama = await this.fetchGithubPaginado<{
@@ -718,7 +727,7 @@ export class GithubService {
         };
         author?: { login?: string };
       }>(
-        `https://api.github.com/repos/${encoded}/commits?sha=${encodeURIComponent(rama.name)}&per_page=20`,
+        `https://api.github.com/repos/${encoded}/commits?sha=${encodeURIComponent(rama.name)}&per_page=1`,
         tokenGithub,
         1,
       );
