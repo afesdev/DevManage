@@ -1,170 +1,192 @@
 # DevManage
 
-**La plataforma todo-en-uno para el ciclo de vida del desarrollo de software.**
-
-DevManage centraliza la gestión de proyectos, la documentación técnica y la actividad de GitHub en un solo lugar, eliminando la necesidad de alternar entre Jira, Notion y GitHub para entender en qué está trabajando el equipo.
+Plataforma para unificar **proyectos**, **tablero Kanban**, **documentación** y **visibilidad de GitHub** en un solo lugar.
 
 ---
 
-## Problema que resuelve
+## Contenido de esta documentación
 
-Los equipos de desarrollo viven entre tres herramientas que no se hablan entre sí: el tablero de tareas, el wiki de documentación y el repositorio de código. El resultado es que nadie sabe realmente en qué archivo está trabajando un desarrollador, qué tarea está vinculada a qué rama, ni cuánto avance real tiene el proyecto sin preguntar.
-
-DevManage conecta estas tres piezas en una sola interfaz.
-
----
-
-## Funcionalidades
-
-### Motor de gestión de proyectos (Kanban)
-
-- Creación de múltiples proyectos con tableros Kanban configurables.
-- Columnas dinámicas y personalizables: Backlog, To-Do, En Progreso, Code Review, Hecho — o cualquier flujo que el equipo defina.
-- Jerarquía de trabajo en tres niveles: Épicas → Tareas → Subtareas.
-- Etiquetas, prioridades (crítica, alta, media, baja) y asignación de responsables.
-- Filtros rápidos: Mis tareas, Tareas bloqueadas, PRs pendientes de revisión.
-- Historial de actividad por tarea: cada cambio de columna, reasignación o vínculo con GitHub queda registrado automáticamente.
-
-### Documentación nativa (Wiki)
-
-- Base de conocimiento integrada al proyecto, sin salir de DevManage.
-- Editor Markdown con soporte de jerarquía de páginas (secciones y subsecciones).
-- Vinculación directa entre páginas de documentación y tareas del tablero.
-- Historial de ediciones con autor y timestamp de cada cambio.
-- Ideal para arquitectura del sistema, decisiones técnicas, guías de onboarding y requerimientos.
-
-### GitHub Bridge (solo lectura)
-
-- Conexión con repositorios de GitHub para visualizar la actividad del código en contexto.
-- Detección automática de ramas, commits y pull requests vinculados a cada tarea.
-- Timeline en vivo dentro de cada tarea: rama creada → commits con archivos modificados → PR abierto.
-- Indicador visual de "Actividad en curso" cuando hay commits recientes en la rama vinculada, sin mover la tarjeta manualmente.
-- Vista de archivos activos: qué archivos tocó cada desarrollador en los últimos commits.
-- DevManage **nunca escribe** en GitHub. Solo lee y muestra la información.
-
-### Seguimiento de progreso
-
-- Porcentaje de completitud del proyecto calculado automáticamente según tareas terminadas.
-- Panel de hitos con fechas y estado visual.
-- Estadísticas del repositorio: ramas activas, commits en los últimos 30 días, PRs cerrados.
-- Feed de actividad unificado: eventos del tablero y de GitHub en una sola línea de tiempo.
-
-### Actividad en tiempo real
-
-- El tablero se actualiza en vivo cuando un desarrollador hace push a una rama vinculada.
-- El líder técnico ve el estado real del trabajo sin preguntar: qué archivo se está editando, si el PR ya está abierto, cuántos commits lleva la tarea.
+- [Requisitos](#requisitos)
+- [Estructura del repositorio](#estructura-del-repositorio)
+- [Puesta en marcha local](#puesta-en-marcha-local)
+- [Variables de entorno](#variables-de-entorno)
+- [Base de datos](#base-de-datos)
+- [API y documentación OpenAPI](#api-y-documentación-openapi)
+- [Módulos principales](#módulos-principales)
+- [Integración GitHub](#integración-github)
+- [Despliegue](#despliegue)
+- [Roadmap](#roadmap)
 
 ---
 
-## Stack tecnológico
+## Requisitos
 
-| Capa | Tecnología |
-|---|---|
-| Frontend | React 19 + TypeScript + Vite |
-| Estado | TanStack Query + Zustand |
-| UI | Tailwind CSS + dnd kit |
-| Backend | NestJS + TypeScript |
-| Base de datos | SQL Server |
-| Tiempo real | Socket.io (WebSockets) |
-| Auth | JWT + GitHub OAuth |
-| Frontend hosting | Vercel |
-| Backend hosting | Render |
+- **Node.js** 20+ (o **Bun** 1.x, si ya lo usas en el equipo)
+- **SQL Server** accesible desde la máquina o desde el hosting del backend
+- Cuenta **GitHub** para OAuth y/o webhooks (opcional según el flujo)
 
 ---
 
-## Estructura del proyecto
+## Estructura del repositorio
 
 ```
-devmanage/
-├── devmanage-frontend/     # React + Vite
-└── devmanage-backend/      # NestJS + SQL Server
-    ├── src/
-    │   ├── config/         # Variables de entorno tipadas
-    │   ├── database/       # Pool de conexión SQL Server
-    │   ├── auth/           # JWT + GitHub OAuth
-    │   ├── nucleo/         # Usuarios, equipos, proyectos
-    │   ├── tablero/        # Kanban, tareas, épicas
-    │   ├── documentos/     # Wiki y vínculos
-    │   ├── github/         # Webhook y sincronización (solo lectura)
-    │   └── realtime/       # WebSocket gateway
-    └── .env.example
+DevManage/
+├── DevManage-Frontend/    # React + TypeScript + Vite
+├── DevManage-Backend/     # NestJS + TypeScript + SQL Server
+└── README.md              # Este archivo
 ```
+
+El DDL completo del esquema está en:
+
+`DevManage-Backend/Database/BASE DE DATOS.sql`
 
 ---
 
-## Esquema de base de datos
+## Puesta en marcha local
 
-La base de datos está organizada en cuatro esquemas que reflejan los dominios del sistema:
+### 1. Base de datos
 
-- `nucleo` — Usuarios, equipos y proyectos.
-- `tablero` — Columnas, épicas, tareas, etiquetas, comentarios y actividad.
-- `documentos` — Páginas wiki y vínculos a tareas.
-- `github` — Repositorios, ramas, confirmaciones, archivos modificados y solicitudes de integración (solo lectura).
+Ejecuta el script SQL contra tu instancia (crea esquemas `nucleo`, `tablero`, `documentos`, `github`, etc.).
+
+### 2. Backend
+
+```bash
+cd DevManage-Backend
+cp .env.example .env
+# Edita .env con SQL Server, JWT y (opcional) GitHub
+
+bun install   # o npm install
+bun run start:dev
+```
+
+Por defecto el API escucha en el puerto configurado en `PORT` (típicamente `3000`).
+
+### 3. Frontend
+
+```bash
+cd DevManage-Frontend
+# Opcional: .env con VITE_API_URL=http://localhost:3000 (por defecto ya usa ese valor)
+
+bun install   # o npm install
+bun run dev
+```
+
+Asegúrate de que **CORS** en el backend incluya el origen del frontend (variable `CORS_ORIGIN` en `.env`).
+
+---
+
+## Variables de entorno
+
+Referencia principal: `DevManage-Backend/.env.example`.
+
+| Área | Variables (ejemplos) | Notas |
+|------|----------------------|--------|
+| Servidor | `PORT`, `CORS_ORIGIN` | Orígenes separados por coma |
+| App | `FRONTEND_URL` | Base URL del frontend; usada tras OAuth GitHub |
+| SQL Server | `DB_SERVER`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_ENCRYPT`, `DB_TRUST_SERVER_CERTIFICATE`, `DB_CONNECT_TIMEOUT_MS` | Ajusta firewall si la BD está en la nube |
+| Auth | `JWT_SECRET`, `JWT_EXPIRES_IN` | El secreto debe ser fuerte en producción |
+| GitHub | `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN` (opcional), `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_OAUTH_CALLBACK_URL` | OAuth: callback debe coincidir **exactamente** con la GitHub OAuth App |
+
+---
+
+## Base de datos
+
+Esquemas conceptuales:
+
+- **`nucleo`** — usuarios, proyectos, membresías
+- **`tablero`** — columnas, épicas, tareas, actividad
+- **`documentos`** — wiki / páginas (si está en uso en tu despliegue)
+- **`github`** — repositorios vinculados, ramas, confirmaciones, PRs, vínculos tarea ↔ GitHub
+
+DevManage **no escribe** en GitHub; solo consume la API y webhooks para reflejar estado en la BD.
+
+---
+
+## API y documentación OpenAPI
+
+Con el backend en marcha:
+
+| Recurso | Ruta típica |
+|---------|-------------|
+| Documentación interactiva (Scalar) | `http://localhost:3000/docs` |
+| Especificación Swagger UI | `http://localhost:3000/openapi` |
+| Salud | `http://localhost:3000/health` |
+| Salud + BD | `http://localhost:3000/health/db` |
+
+---
+
+## Módulos principales
+
+### Tablero (Kanban)
+
+- Columnas y tareas con drag-and-drop
+- Épicas, tarea padre, responsable, prioridad, tipo, fecha límite
+- Descripción de tarea con **Markdown** (editor con vista en vivo y lectura formateada)
+
+### Autenticación
+
+- JWT para sesión de la aplicación
+- **GitHub OAuth** opcional por usuario (para leer repos privados y sincronizar sin PAT en el cliente)
+
+### GitHub (solo lectura hacia GitHub)
+
+- Vincular repositorios a un proyecto
+- Listado de ramas y PRs ingeridos
+- Vista detallada por repositorio: filtros, archivos de PR, diffs, commits, trazabilidad con tareas, eventos hacia producción (`main`), etc.
+- Webhooks `push` y `pull_request` para mantener datos al día; sincronización manual y refresco periódico en la UI
+
+### Documentación en app
+
+- Wiki / páginas según lo desplegado en tu instancia (esquema `documentos` en SQL)
+
+---
+
+## Integración GitHub
+
+### 1. OAuth App (usuarios)
+
+En GitHub: **Settings → Developer settings → OAuth Apps**.
+
+- **Authorization callback URL**: debe ser exactamente  
+  `{URL_PÚBLICA_DEL_API}/auth/github/callback`  
+  (ej. `https://tu-servicio.onrender.com/auth/github/callback`)
+- Configura en el servidor: `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_OAUTH_CALLBACK_URL`, `FRONTEND_URL`
+
+Tras autorizar, el usuario puede resolver repos privados y usar sincronización sin pegar tokens en la UI.
+
+### 2. Webhook (por repositorio)
+
+- **Payload URL**: `{URL_PÚBLICA_DEL_API}/github/webhook`
+- **Content type**: `application/json`
+- **Secret**: mismo valor que `GITHUB_WEBHOOK_SECRET`
+- **Eventos**: al menos `push` y `pull_request`
+
+### 3. PAT del servidor (opcional)
+
+`GITHUB_TOKEN` permite que el servidor consulte la API de GitHub cuando no hay OAuth de usuario; útil para scripts o entornos sin login GitHub en cada petición.
+
+### 4. Vincular repositorio
+
+Desde la UI de GitHub en DevManage: conectar cuenta, vincular repo al proyecto activo. Tras vincular, conviene ejecutar **Sincronizar** al menos una vez si el historial no está completo.
 
 ---
 
 ## Despliegue
 
-### Variables de entorno
-
-Copia `.env.example` a `.env` y completa los valores:
-
-```bash
-cp .env.example .env
-```
-
-Las variables requeridas son:
-
-- Conexión a SQL Server (`DB_SERVER`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`)
-- Secretos JWT (`JWT_SECRET`, `JWT_REFRESH_SECRET`)
-- GitHub OAuth App (`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`)
-- Secreto del webhook de GitHub (`GITHUB_WEBHOOK_SECRET`)
-
-### Desarrollo local
-
-```bash
-# Backend
-cd devmanage-backend
-npm install
-npm run start:dev
-
-# Frontend
-cd devmanage-frontend
-npm install
-npm run dev
-```
-
-### Producción
-
-- **Frontend** → desplegado en Vercel conectando el repositorio de GitHub.
-- **Backend** → desplegado en Render como Web Service con las variables de entorno configuradas en el dashboard.
-- **Base de datos** → SQL Server externo, accesible desde las IPs de salida de Render.
-
----
-
-## Configuración del GitHub Bridge
-
-1. Crear una **GitHub OAuth App** en `https://github.com/settings/developers`.
-   - Authorization callback URL: `https://tu-backend.render.com/auth/github/callback`
-   - Scopes requeridos: `user:email`, `repo` (solo lectura)
-
-2. Crear un **Webhook** en cada repositorio que quieras conectar:
-   - Payload URL: `https://tu-backend.render.com/github/webhook`
-   - Content type: `application/json`
-   - Secret: el valor de `GITHUB_WEBHOOK_SECRET`
-   - Eventos: `push`, `pull_request`, `create`, `delete`
-
-3. Desde DevManage, vincular el repositorio al proyecto correspondiente.
+- **Backend**: servicio Node (por ejemplo Render) con todas las variables de entorno y acceso saliente a SQL Server.
+- **Frontend**: estático o SSR según tu elección (por ejemplo Vercel); configurar `CORS_ORIGIN` y la URL base del API en el cliente.
+- **GitHub**: callback URL y webhook deben apuntar al dominio **real** del backend desplegado.
 
 ---
 
 ## Roadmap
 
-- [ ] Notificaciones por correo al asignar tareas
-- [ ] Exportar tablero a PDF
-- [ ] Integración con Slack para alertas de actividad
-- [ ] App móvil (React Native)
-- [ ] Soporte multi-idioma
+Ideas de evolución (no exhaustivo):
+
+- Notificaciones (correo / Slack)
+- Exportación de tablero o informes
+- Optimización de sincronización incremental en repos muy grandes
+- Mejoras de tiempo real (WebSockets) si el producto lo requiere
 
 ---
 

@@ -7,6 +7,7 @@ import {
 import { DatabaseService } from '../database/database.service';
 import { ActualizarTareaDto } from './dto/actualizar-tarea.dto';
 import { CrearEpicaDto } from './dto/crear-epica.dto';
+import { CrearEtiquetaDto } from './dto/crear-etiqueta.dto';
 import { CrearTareaDto } from './dto/crear-tarea.dto';
 
 export interface ProyectoResumen {
@@ -59,6 +60,18 @@ export interface MiembroProyectoResumen {
   nombre_visible: string;
   correo: string;
   rol: string;
+}
+
+export interface EtiquetaResumen {
+  etiqueta_id: string;
+  proyecto_id: string;
+  nombre: string;
+  color: string;
+}
+
+export interface TareaEtiquetaResumen {
+  tarea_id: string;
+  etiqueta_id: string;
 }
 
 @Injectable()
@@ -286,6 +299,76 @@ export class TableroService {
         )
       ORDER BY u.nombre_visible ASC`,
       { proyecto_id: proyectoId, actor_id: usuarioId },
+    );
+  }
+
+  async obtenerEtiquetasPorProyecto(
+    proyectoId: string,
+    usuarioId: string,
+  ): Promise<EtiquetaResumen[]> {
+    await this.validarAccesoProyecto(proyectoId, usuarioId);
+    return this.db.query<EtiquetaResumen>(
+      `SELECT
+        etiqueta_id,
+        proyecto_id,
+        nombre,
+        color
+      FROM tablero.Etiquetas
+      WHERE proyecto_id = @proyecto_id
+      ORDER BY nombre ASC`,
+      { proyecto_id: proyectoId },
+    );
+  }
+
+  async crearEtiqueta(
+    proyectoId: string,
+    dto: CrearEtiquetaDto,
+    usuarioId: string,
+  ): Promise<EtiquetaResumen> {
+    await this.validarAccesoProyecto(proyectoId, usuarioId);
+    const nombre = dto.nombre.trim();
+    if (!nombre) {
+      throw new BadRequestException('El nombre de la etiqueta es obligatorio');
+    }
+    const etiqueta = await this.db.queryOne<EtiquetaResumen>(
+      `INSERT INTO tablero.Etiquetas (
+        proyecto_id,
+        nombre,
+        color
+      )
+      OUTPUT
+        INSERTED.etiqueta_id,
+        INSERTED.proyecto_id,
+        INSERTED.nombre,
+        INSERTED.color
+      VALUES (
+        @proyecto_id,
+        @nombre,
+        @color
+      )`,
+      {
+        proyecto_id: proyectoId,
+        nombre,
+        color: dto.color ?? '#888780',
+      },
+    );
+    if (!etiqueta) {
+      throw new NotFoundException('No se pudo crear la etiqueta');
+    }
+    return etiqueta;
+  }
+
+  async obtenerEtiquetasPorTarea(
+    proyectoId: string,
+    usuarioId: string,
+  ): Promise<TareaEtiquetaResumen[]> {
+    await this.validarAccesoProyecto(proyectoId, usuarioId);
+    return this.db.query<TareaEtiquetaResumen>(
+      `SELECT te.tarea_id, te.etiqueta_id
+      FROM tablero.TareasEtiquetas te
+      INNER JOIN tablero.Tareas t ON t.tarea_id = te.tarea_id
+      WHERE t.proyecto_id = @proyecto_id`,
+      { proyecto_id: proyectoId },
     );
   }
 
@@ -695,5 +778,67 @@ export class TableroService {
     await this.actualizarPosicionesColumna(tarea.columna_id, restantesIds);
 
     return { mensaje: 'Tarea eliminada correctamente' };
+  }
+
+  async asignarEtiquetaATarea(
+    tareaId: string,
+    etiquetaId: string,
+    usuarioId: string,
+  ): Promise<{ mensaje: string }> {
+    const tarea = await this.db.queryOne<{ proyecto_id: string }>(
+      `SELECT TOP 1 proyecto_id FROM tablero.Tareas WHERE tarea_id = @tarea_id`,
+      { tarea_id: tareaId },
+    );
+    if (!tarea) throw new NotFoundException('Tarea no encontrada');
+    await this.validarAccesoProyecto(tarea.proyecto_id, usuarioId);
+
+    const etiqueta = await this.db.queryOne<{ etiqueta_id: string }>(
+      `SELECT TOP 1 etiqueta_id
+      FROM tablero.Etiquetas
+      WHERE etiqueta_id = @etiqueta_id
+        AND proyecto_id = @proyecto_id`,
+      { etiqueta_id: etiquetaId, proyecto_id: tarea.proyecto_id },
+    );
+    if (!etiqueta) {
+      throw new BadRequestException('La etiqueta no pertenece al proyecto de la tarea');
+    }
+
+    await this.db.query(
+      `IF NOT EXISTS (
+        SELECT 1
+        FROM tablero.TareasEtiquetas
+        WHERE tarea_id = @tarea_id
+          AND etiqueta_id = @etiqueta_id
+      )
+      BEGIN
+        INSERT INTO tablero.TareasEtiquetas (tarea_id, etiqueta_id)
+        VALUES (@tarea_id, @etiqueta_id)
+      END`,
+      { tarea_id: tareaId, etiqueta_id: etiquetaId },
+    );
+
+    return { mensaje: 'Etiqueta asignada correctamente' };
+  }
+
+  async quitarEtiquetaDeTarea(
+    tareaId: string,
+    etiquetaId: string,
+    usuarioId: string,
+  ): Promise<{ mensaje: string }> {
+    const tarea = await this.db.queryOne<{ proyecto_id: string }>(
+      `SELECT TOP 1 proyecto_id FROM tablero.Tareas WHERE tarea_id = @tarea_id`,
+      { tarea_id: tareaId },
+    );
+    if (!tarea) throw new NotFoundException('Tarea no encontrada');
+    await this.validarAccesoProyecto(tarea.proyecto_id, usuarioId);
+
+    await this.db.query(
+      `DELETE FROM tablero.TareasEtiquetas
+      WHERE tarea_id = @tarea_id
+        AND etiqueta_id = @etiqueta_id`,
+      { tarea_id: tareaId, etiqueta_id: etiquetaId },
+    );
+
+    return { mensaje: 'Etiqueta removida correctamente' };
   }
 }

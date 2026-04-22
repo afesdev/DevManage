@@ -467,14 +467,40 @@ export class GithubService {
     }
 
     for (const tareaId of targets) {
-      const existe = await this.db.queryOne<{ existe: number }>(
-        `SELECT TOP 1 1 AS existe
-        FROM github.VinculosTareaGithub
-        WHERE tarea_id = @tarea_id
-          AND rama_id = @rama_id`,
-        { tarea_id: tareaId, rama_id: args.ramaId },
+      const vinculoExistente = await this.db.queryOne<{
+        vinculo_id: string;
+        rama_id: string | null;
+      }>(
+        `SELECT TOP 1 v.vinculo_id, v.rama_id
+        FROM github.VinculosTareaGithub v
+        LEFT JOIN github.Ramas r ON r.rama_id = v.rama_id
+        WHERE v.tarea_id = @tarea_id
+          AND r.repositorio_id = @repositorio_id
+          AND v.solicitud_id IS NULL
+        ORDER BY v.vinculado_en DESC`,
+        { tarea_id: tareaId, repositorio_id: args.repositorioId },
       );
-      if (existe) continue;
+
+      // Si ya hay vínculo de rama para esta tarea en el repo:
+      // - misma rama: no hacer nada
+      // - distinta rama: reemplazar por la nueva (evita mezclar commits de ramas viejas)
+      if (vinculoExistente?.vinculo_id) {
+        if (vinculoExistente.rama_id === args.ramaId) continue;
+        await this.db.query(
+          `UPDATE github.VinculosTareaGithub
+          SET rama_id = @rama_id,
+              vinculado_por = @vinculado_por,
+              vinculado_en = SYSUTCDATETIME()
+          WHERE vinculo_id = @vinculo_id`,
+          {
+            vinculo_id: vinculoExistente.vinculo_id,
+            rama_id: args.ramaId,
+            vinculado_por: actorId,
+          },
+        );
+        continue;
+      }
+
       await this.db.query(
         `INSERT INTO github.VinculosTareaGithub (tarea_id, rama_id, vinculado_por)
         VALUES (@tarea_id, @rama_id, @vinculado_por)`,
