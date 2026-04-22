@@ -1241,7 +1241,7 @@ export class GithubService {
 
       UNION ALL
 
-      SELECT
+      SELECT DISTINCT
         'commit' AS tipo,
         c.confirmado_en AS ocurrido_en,
         r.nombre AS rama,
@@ -1255,6 +1255,20 @@ export class GithubService {
       INNER JOIN github.Confirmaciones c ON c.rama_id = r.rama_id
       WHERE v.tarea_id = @tarea_id
         AND r.repositorio_id = @repositorio_id
+        AND (
+          LOWER(c.mensaje) LIKE '%' + LOWER(@tarea_id) + '%'
+          OR LOWER(c.mensaje) LIKE '%dm-' + LOWER(LEFT(@tarea_id, 8)) + '%'
+          OR EXISTS (
+            SELECT 1
+            FROM github.VinculosTareaGithub vpr
+            INNER JOIN github.SolicitudesIntegracion si ON si.solicitud_id = vpr.solicitud_id
+            WHERE vpr.tarea_id = @tarea_id
+              AND si.repositorio_id = @repositorio_id
+              AND si.rama_origen = r.nombre
+              AND c.confirmado_en >= DATEADD(DAY, -1, si.abierta_en)
+              AND c.confirmado_en <= COALESCE(si.integrada_en, si.cerrada_en, SYSUTCDATETIME())
+          )
+        )
 
       UNION ALL
 

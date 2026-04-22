@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Headers,
   Param,
@@ -65,7 +66,7 @@ export class GithubController {
   ): Promise<RepositorioGithubUsuario[]> {
     const tokenUsuario = await this.authService.obtenerTokenGithubAcceso(usuarioId);
     if (!tokenUsuario) {
-      throw new UnauthorizedException('Primero conecta tu cuenta de GitHub.');
+      throw new ForbiddenException('Primero conecta tu cuenta de GitHub.');
     }
     return this.githubService.listarRepositoriosUsuario(tokenUsuario, proyectoId, usuarioId);
   }
@@ -129,7 +130,7 @@ export class GithubController {
   ): Promise<{ estado: string; ramas: number; prs: number }> {
     const tokenGithub = await this.authService.obtenerTokenGithubAcceso(usuarioId);
     if (!tokenGithub) {
-      throw new UnauthorizedException('Primero conecta tu cuenta de GitHub.');
+      throw new ForbiddenException('Primero conecta tu cuenta de GitHub.');
     }
     const resultado = await this.githubService.sincronizarRepositorio(
       repositorioId,
@@ -150,7 +151,7 @@ export class GithubController {
   ): Promise<ArchivoPullRequestGithub[]> {
     const tokenGithub = await this.authService.obtenerTokenGithubAcceso(usuarioId);
     if (!tokenGithub) {
-      throw new UnauthorizedException('Primero conecta tu cuenta de GitHub.');
+      throw new ForbiddenException('Primero conecta tu cuenta de GitHub.');
     }
     return this.githubService.obtenerArchivosPullRequest(
       repositorioId,
@@ -189,7 +190,7 @@ export class GithubController {
   ): Promise<CommitGithubResumen[]> {
     const tokenGithub = await this.authService.obtenerTokenGithubAcceso(usuarioId);
     if (!tokenGithub) {
-      throw new UnauthorizedException('Primero conecta tu cuenta de GitHub.');
+      throw new ForbiddenException('Primero conecta tu cuenta de GitHub.');
     }
     return this.githubService.obtenerCommitsPullRequest(
       repositorioId,
@@ -243,7 +244,7 @@ export class GithubController {
   ): Promise<EventoProduccionResumen[]> {
     const tokenGithub = await this.authService.obtenerTokenGithubAcceso(usuarioId);
     if (!tokenGithub) {
-      throw new UnauthorizedException('Primero conecta tu cuenta de GitHub.');
+      throw new ForbiddenException('Primero conecta tu cuenta de GitHub.');
     }
     return this.githubService.obtenerEventosProduccion(repositorioId, tokenGithub, usuarioId);
   }
